@@ -67,6 +67,25 @@ omarchy plugin enable gh0st.linecast center
 
 Move it around the bar with `omarchy bar move gh0st.linecast --section <left|center|right>`.
 
+## Removal
+
+```bash
+omarchy plugin remove gh0st.linecast
+```
+
+Or manually:
+
+```bash
+omarchy plugin disable gh0st.linecast
+rm -rf ~/.config/omarchy/plugins/linecast
+```
+
+Neither path touches anything outside this plugin's own folder and bar
+placement -- linecast itself (installed separately, see Requirements
+above) is untouched either way; remove it the same way you installed it
+(`uv tool uninstall linecast`, `pipx uninstall linecast`, etc.) if you no
+longer want it either.
+
 ## Usage
 
 - **Click** the temperature pill to open the dashboard.

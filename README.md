@@ -1,8 +1,9 @@
 # Linecast for Omarchy
 
 A companion to Omarchy's built-in weather widget: shows the current
-temperature in the bar, and opens a full, live, interactive dashboard —
-Weather, Radar, Sunshine, Moon, Tides, and Maps — right from the menu bar.
+temperature in the bar, and opens all six of linecast's views — Weather,
+Radar, Sunshine, Moon, Tides, and Maps — live and interactive in one
+popup, right from the menu bar.
 
 ![Screenshot](screenshot.png)
 
@@ -24,8 +25,9 @@ If you find this useful, go star [linecast](https://github.com/ashuttl/linecast)
 ## Features
 
 - **Bar pill**: current temperature + condition icon, refreshed periodically.
-- **Click to open** a popup dashboard with six tabs: Weather, Radar,
-  Sunshine, Moon, Tides, Maps.
+- **Click to open** one popup dashboard with all six of linecast's views —
+  Weather, Radar, Sunshine, Moon, Tides, Maps — as tabs, each embedded
+  and fully interactive right there; nothing opens in a separate window.
 - **Actually live**, not a static snapshot — radar animation, live sun/moon
   position, etc., exactly like running `linecast` in a terminal.
 - **Real interactivity**: keyboard shortcuts (e.g. radar's layer toggles

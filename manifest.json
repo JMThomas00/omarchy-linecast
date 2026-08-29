@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "Jordan Thomas (JMThomas00)",
   "license": "MIT",
-  "description": "Companion to the Omarchy weather widget, backed by the linecast CLI (https://github.com/ashuttl/linecast): shows the current temperature in the bar, and opens a full dashboard with Weather, Radar, Sunshine, Moon, Tides, and Maps tabs, all live-animated and driven by real keyboard/mouse input, not just a static snapshot.",
+  "description": "Companion to the Omarchy weather widget, backed by the linecast CLI (https://github.com/ashuttl/linecast): one popup with all six of linecast's views — Weather, Radar, Sunshine, Moon, Tides, and Maps — replayed live from its own terminal output, with real keyboard and mouse input forwarded back into it, not reimplemented or simulated.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Linecast",
-    "description": "Current temperature in the bar; click for a live, interactive linecast dashboard (weather/radar/sunshine/moon/tides/maps)",
+    "description": "Current temperature in the bar; click for linecast's Weather, Radar, Sunshine, Moon, Tides, and Maps, all live and interactive in one popup",
     "category": "Info",
     "allowMultiple": false
   }

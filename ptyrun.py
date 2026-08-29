@@ -13,6 +13,8 @@
 # input to the child -- what makes linecast's own interactivity (radar's
 # theme/layer toggles, maps' pan and zoom) work instead of just watching a
 # recording of it.
+import ctypes
+import ctypes.util
 import fcntl
 import os
 import pty
@@ -22,6 +24,26 @@ import signal
 import struct
 import sys
 import termios
+
+# Quickshell normally shuts us down cooperatively (proc.running = false ->
+# SIGTERM -> our handle_term below -> SIGTERM to the linecast child), but
+# that only runs if Quickshell itself exits cleanly. A crash, `kill -9`, or
+# a hard shell restart (quickshell kill -p ...) skips all of that, and
+# without this, both ptyrun.py and the linecast process it execs are
+# reparented to init and run forever -- confirmed directly: restarting the
+# Omarchy shell during testing left prior sessions' ptyrun+linecast pairs
+# running minutes later, still burning CPU. PR_SET_PDEATHSIG asks the
+# kernel to deliver SIGTERM to us the moment our parent thread's process
+# exits, for any reason, so orphaning can't happen even on a hard kill.
+_PR_SET_PDEATHSIG = 1
+
+
+def _die_with_parent():
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+    except Exception:
+        pass
 
 # linecast probes its terminal for the active colour theme via OSC 10/11/4
 # queries (see its _theme.py) and falls back to a fixed dark palette when
@@ -141,6 +163,8 @@ def main():
     if not cmd:
         sys.exit("ptyrun: no command given")
 
+    _die_with_parent()
+
     master_fd, slave_fd = pty.openpty()
     fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
@@ -148,6 +172,10 @@ def main():
     if pid == 0:
         os.close(master_fd)
         os.setsid()
+        # prctl(2): PDEATHSIG is cleared for the child of a fork(), so the
+        # arm-before-fork above only protects ptyrun.py itself -- rearm here,
+        # against ptyrun.py (this child's real parent) rather than Quickshell.
+        _die_with_parent()
         fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
         os.dup2(slave_fd, 0)
         os.dup2(slave_fd, 1)

@@ -28,9 +28,10 @@ If you find this useful, go star [linecast](https://github.com/ashuttl/linecast)
   Sunshine, Moon, Tides, Maps.
 - **Actually live**, not a static snapshot — radar animation, live sun/moon
   position, etc., exactly like running `linecast` in a terminal.
-- **Real interactivity**: keyboard shortcuts (e.g. radar's theme/layer
-  toggles) and mouse — click, drag to pan, scroll to zoom on Maps — are
-  forwarded into the running `linecast` process, not simulated.
+- **Real interactivity**: keyboard shortcuts (e.g. radar's layer toggles
+  and zoom, arrow-key time-scrubbing) and mouse — click, drag to pan,
+  scroll to zoom on Maps — are forwarded into the running `linecast`
+  process, not simulated.
 - Renders at a fixed, uniform grid resolution so every tab looks consistent
   regardless of how much detail that particular view draws.
 
@@ -73,11 +74,16 @@ Move it around the bar with `omarchy bar move gh0st.linecast --section <left|cen
 - **Scroll / drag / click** inside a tab the same way you would in a real
   terminal running that linecast view (e.g. drag to pan Maps, scroll to
   zoom).
-- Keyboard shortcuts linecast itself defines (radar's `s`/`t`/`c`/`w`, etc.)
-  work when a tab has focus — click into it first.
+- Keyboard shortcuts linecast itself defines (radar's `s`/`c`/`w` layer
+  toggles, `+`/`-` zoom, arrow keys to scrub through time) work when a tab
+  has focus — click into it first.
 - The small ⟳ in the top-right of the dashboard restarts the current tab's
   view if it ever gets stuck.
-- **Esc** closes the dashboard.
+- **Esc** closes the dashboard. Note: this always closes the dashboard
+  first, rather than dismissing anything linecast itself has open (e.g.
+  radar's `t` theme picker) — those don't currently render through this
+  plugin, so avoid opening them; if one gets triggered by accident, the
+  same key that opened it (or the ⟳ restart button) gets back out.
 
 ## How it works, briefly
 

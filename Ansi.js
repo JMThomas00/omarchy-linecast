@@ -9,6 +9,27 @@
 // strings: TermCanvas's background pass writes straight into a pixel
 // buffer and never needs a CSS string at all, and its text pass only
 // formats one per run instead of once per parsed segment.
+function _colorEq(a, b) {
+  if (a === b) return true
+  if (!a || !b) return false
+  return a.r === b.r && a.g === b.g && a.b === b.b
+}
+
+// Known gap: linecast's floating overlays (the theme picker opened with
+// 't', and likely others -- warning tooltips, maps' search/route panel)
+// position each of their rows with an absolute cursor jump (CSI row;colH),
+// not sequential text -- confirmed directly by capturing the raw bytes
+// with the picker open. This parser has no notion of a 2D addressable
+// grid (it only ever appends to whatever row is currently open, splitting
+// on literal '\n'), so a mid-frame row;col jump lands as more text tacked
+// onto whatever row is already open rather than at its real position --
+// the picker's box currently renders squashed onto the footer row instead
+// of as its own box. Properly fixing it means turning this into a real
+// cursor-addressable grid (plus handling reverse-video SGR, which the
+// picker's selected-row highlight also uses and this parser doesn't
+// support either) -- out of scope here since it only affects a secondary
+// interactive extra, not the core dashboard views, all of which render
+// correctly without ever needing mid-frame repositioning.
 function parseAnsi(raw) {
   var ESC = String.fromCharCode(27)
   var text = String(raw || "")
@@ -45,23 +66,38 @@ function parseAnsi(raw) {
 
       var terminator = text.charAt(j)
       if (terminator === 'm') {
+        // linecast reasserts the current color before nearly every single
+        // cell rather than only on actual changes (confirmed directly: a
+        // captured radar frame carried 112 SGR sequences across 80 visible
+        // characters on one line) -- flushing unconditionally on every 'm'
+        // turned each of those into its own one-character segment, which is
+        // what made both this parse and TermCanvas's paint loop measurably
+        // slow for radar/maps specifically (measured: tens of ms each,
+        // confirmed via BarWidget's own render-timer instrumentation).
+        // Computing the prospective new state first and only flushing when
+        // it's actually different collapses all those redundant resets back
+        // into the single real run they represent.
         var codes = text.slice(i + 2, j).split(';')
-        flush()
+        var newFg = fg, newBg = bg, newBold = bold
         var k = 0
         while (k < codes.length) {
           var code = parseInt(codes[k], 10) || 0
-          if (code === 0) { fg = null; bg = null; bold = false }
-          else if (code === 1) { bold = true }
-          else if (code === 22) { bold = false }
+          if (code === 0) { newFg = null; newBg = null; newBold = false }
+          else if (code === 1) { newBold = true }
+          else if (code === 22) { newBold = false }
           else if (code === 38 && codes[k + 1] === '2') {
-            fg = { r: parseInt(codes[k + 2], 10) || 0, g: parseInt(codes[k + 3], 10) || 0, b: parseInt(codes[k + 4], 10) || 0 }
+            newFg = { r: parseInt(codes[k + 2], 10) || 0, g: parseInt(codes[k + 3], 10) || 0, b: parseInt(codes[k + 4], 10) || 0 }
             k += 4
           } else if (code === 48 && codes[k + 1] === '2') {
-            bg = { r: parseInt(codes[k + 2], 10) || 0, g: parseInt(codes[k + 3], 10) || 0, b: parseInt(codes[k + 4], 10) || 0 }
+            newBg = { r: parseInt(codes[k + 2], 10) || 0, g: parseInt(codes[k + 3], 10) || 0, b: parseInt(codes[k + 4], 10) || 0 }
             k += 4
-          } else if (code === 39) { fg = null }
-          else if (code === 49) { bg = null }
+          } else if (code === 39) { newFg = null }
+          else if (code === 49) { newBg = null }
           k++
+        }
+        if (!_colorEq(newFg, fg) || !_colorEq(newBg, bg) || newBold !== bold) {
+          flush()
+          fg = newFg; bg = newBg; bold = newBold
         }
       }
       // Any other terminator (K, H, J, private mode h/l, ...) — no visible

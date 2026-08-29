@@ -103,7 +103,7 @@ BarWidget {
   // erase-screen/resets then cursor-home in another) but cursor-home alone
   // reliably appears exactly once per frame in both, and any trailing
   // erase/reset codes left dangling are harmless no-ops to Ansi.parseAnsi.
-  readonly property string frameMarker: "[H"
+  readonly property string frameMarker: root._esc + "[H"
   property string activeTab: "radar"
 
   // Every tab gets its own `--live` process, started once when the panel
@@ -148,20 +148,36 @@ BarWidget {
   // so radar's theme/layer toggles and maps' pan keys work as if this were
   // an actual terminal. Escape is deliberately excluded -- it stays free to
   // bubble up and close the panel instead of being swallowed here.
+  //
+  // Every CSI sequence below needs the literal ESC (0x1b) byte first --
+  // linecast's own reader (_read_key in _live.py) only enters
+  // escape-sequence parsing when the very first byte it reads is ESC;
+  // anything else is treated as a plain, unbound keystroke. Confirmed
+  // directly: the bare "[C" this used to return had no effect at all on a
+  // live radar process, while the correctly-escaped sequence paused
+  // auto-play and scrubbed time exactly as arrow keys are supposed to --
+  // so arrow keys, Page Up/Down, Home, and End were all silently inert.
+  readonly property string _esc: String.fromCharCode(27)
+
   function keyToBytes(event) {
     switch (event.key) {
-      case Qt.Key_Up: return "[A"
-      case Qt.Key_Down: return "[B"
-      case Qt.Key_Right: return "[C"
-      case Qt.Key_Left: return "[D"
+      case Qt.Key_Up: return root._esc + "[A"
+      case Qt.Key_Down: return root._esc + "[B"
+      case Qt.Key_Right: return root._esc + "[C"
+      case Qt.Key_Left: return root._esc + "[D"
       case Qt.Key_Return:
       case Qt.Key_Enter: return "\r"
-      case Qt.Key_Backspace: return ""
+      // DEL (0x7f) -- already correct in the raw source (linecast's
+      // _read_key treats either 0x7f or 0x08 as backspace), just spelled
+      // explicitly: a literal DEL byte in a string literal is invisible
+      // in most editors/diffs and tools -- frameMarker above had the same
+      // thing with a real ESC byte, now spelled the same explicit way.
+      case Qt.Key_Backspace: return String.fromCharCode(127)
       case Qt.Key_Tab: return "\t"
-      case Qt.Key_PageUp: return "[5~"
-      case Qt.Key_PageDown: return "[6~"
-      case Qt.Key_Home: return "[H"
-      case Qt.Key_End: return "[F"
+      case Qt.Key_PageUp: return root._esc + "[5~"
+      case Qt.Key_PageDown: return root._esc + "[6~"
+      case Qt.Key_Home: return root._esc + "[H"
+      case Qt.Key_End: return root._esc + "[F"
       case Qt.Key_Escape: return null
       default:
         if (event.text && event.text.length > 0 && event.text.charCodeAt(0) >= 0x20) return event.text
@@ -186,6 +202,25 @@ BarWidget {
       property string pending: ""   // frame currently being assembled
       property bool dirty: false
       property real lastByteMs: 0   // 0 means "nothing pending to settle"
+      // Once a tab has cleanly cut a frame on a second marker, it's proven
+      // it redraws often enough that a marker cut will always arrive -- the
+      // idle-settle fallback below must never fire for it again. Without
+      // this, radar/maps (redraw every ~150-200ms) hit a race: linecast's
+      // footer line carries no trailing newline, so SplitParser holds it
+      // internally, undelivered, until the *next* frame's bytes supply one.
+      // If the 40ms render timer's 50ms idle check lands in that ordinary
+      // gap -- which it does on a huge fraction of frames, since 50ms is
+      // well under radar's own redraw interval -- it promotes `pending`
+      // one line short (footer missing, still stuck inside SplitParser),
+      // and then the footer arrives moments later stapled onto the *next*
+      // frame's marker, where the `first > 0` trim discards it as
+      // stale-prefix garbage. That's what was making the footer/scrubber
+      // bar flicker in and out during zoom (confirmed directly: captured
+      // the exact promoted `buf` mid-bug, off by exactly one trailing line,
+      // every time). A view that only ever idle-settles (weather, moon,
+      // tides, sunshine, maps) never sets this, so their fallback is
+      // untouched.
+      property bool sawSecondMarker: false
 
       stdout: SplitParser {
         // Only the buffer is updated here — parsing + repainting happens on
@@ -223,7 +258,8 @@ BarWidget {
             procInstance.pending = procInstance.pending.slice(second)
             procInstance.dirty = true
             procInstance.lastByteMs = 0 // already promoted via a clean cut this round
-          } else {
+            procInstance.sawSecondMarker = true
+          } else if (!procInstance.sawSecondMarker) {
             procInstance.lastByteMs = Date.now() // no second marker yet -- idle-settle fallback below
           }
         }
@@ -258,7 +294,7 @@ BarWidget {
       for (var tabId in root.tabProcs) {
         var proc = root.tabProcs[tabId]
         if (!proc) continue
-        if (proc.lastByteMs > 0 && proc.pending.length > 0 && (now - proc.lastByteMs) >= 50) {
+        if (!proc.sawSecondMarker && proc.lastByteMs > 0 && proc.pending.length > 0 && (now - proc.lastByteMs) >= 50) {
           proc.buf = proc.pending
           proc.pending = ""
           proc.dirty = true

@@ -51,6 +51,17 @@ Canvas {
     return c ? ("rgb(" + c.r + "," + c.g + "," + c.b + ")") : ""
   }
 
+  // Column/row -> pixel, snapped to whole device pixels. Two rects computed
+  // as row*lineHeight / (row+1)*lineHeight independently can each round
+  // their shared edge a different way (e.g. 53.664 and 53.336), leaving a
+  // hairline the rasterizer treats as a real gap -- that's what showed up
+  // as faint horizontal seams running across otherwise-solid same-color
+  // radar/maps fills. Routing every edge through this one function means
+  // row r's bottom and row r+1's top are the literal same rounded number,
+  // so adjacent same-color rects always share an exact pixel edge.
+  function _colPx(c) { return Math.round(c * charWidth) }
+  function _rowPx(r) { return Math.round(r * lineHeight) }
+
   onLinesChanged: requestPaint()
   onTargetWidthChanged: requestPaint()
   onTargetHeightChanged: requestPaint()
@@ -64,43 +75,41 @@ Canvas {
     ctx.clearRect(0, 0, Math.max(canvas.width, 4000), Math.max(canvas.height, 4000))
     ctx.textBaseline = "top"
 
-    var r, s, row, seg, x, y, segW
+    var r, s, row, seg, col, yTop, yBot
 
     for (r = 0; r < lines.length; r++) {
       row = lines[r]
-      y = r * lineHeight
+      yTop = canvas._rowPx(r)
+      yBot = canvas._rowPx(r + 1)
 
       // ---- Backgrounds: merge consecutive same-color cells into one rect.
-      x = 0
-      var bgRunX = 0
-      var bgRunW = 0
+      col = 0
+      var bgRunCol = 0
       var bgRunColor = null
       for (s = 0; s < row.length; s++) {
         seg = row[s]
-        segW = seg.text.length * charWidth
         if (bgRunColor && canvas._sameColor(seg.bg, bgRunColor)) {
-          bgRunW += segW
+          // still the same run; width picked up when it ends or at flush
         } else {
           if (bgRunColor) {
             ctx.fillStyle = canvas._rgbString(bgRunColor)
-            ctx.fillRect(bgRunX, y, bgRunW, lineHeight)
+            ctx.fillRect(canvas._colPx(bgRunCol), yTop, canvas._colPx(col) - canvas._colPx(bgRunCol), yBot - yTop)
           }
-          bgRunX = x
-          bgRunW = segW
+          bgRunCol = col
           bgRunColor = seg.bg || null
         }
-        x += segW
+        col += seg.text.length
       }
       if (bgRunColor) {
         ctx.fillStyle = canvas._rgbString(bgRunColor)
-        ctx.fillRect(bgRunX, y, bgRunW, lineHeight)
+        ctx.fillRect(canvas._colPx(bgRunCol), yTop, canvas._colPx(col) - canvas._colPx(bgRunCol), yBot - yTop)
       }
 
       // ---- Foreground text: merge consecutive same-color/weight cells
       //      into one fillText call.
-      x = 0
+      col = 0
       var runText = ""
-      var runX = 0
+      var runCol = 0
       var runFg = null
       var runBold = false
       var haveRun = false
@@ -113,21 +122,61 @@ Canvas {
           if (haveRun && runText.length > 0) {
             ctx.font = (runBold ? "bold " : "") + fontPixelSize + "px " + fontFamily
             ctx.fillStyle = runFg ? canvas._rgbString(runFg) : defaultColor
-            ctx.fillText(runText, runX, y)
+            canvas._fillRun(ctx, runText, canvas._colPx(runCol), yTop, canvas._colPx(col) - canvas._colPx(runCol))
           }
           runText = seg.text
-          runX = x
+          runCol = col
           runFg = seg.fg
           runBold = segBold
           haveRun = true
         }
-        x += seg.text.length * charWidth
+        col += seg.text.length
       }
       if (haveRun && runText.length > 0) {
         ctx.font = (runBold ? "bold " : "") + fontPixelSize + "px " + fontFamily
         ctx.fillStyle = runFg ? canvas._rgbString(runFg) : defaultColor
-        ctx.fillText(runText, runX, y)
+        canvas._fillRun(ctx, runText, canvas._colPx(runCol), yTop, canvas._colPx(col) - canvas._colPx(runCol))
       }
+    }
+  }
+
+  // fillText() lays a multi-character string out using the font's own
+  // glyph advance widths, which almost never matches charWidth (a fixed
+  // pixel-box-divided-by-grid value with no relation to the font's actual
+  // metrics at fontPixelSize). Left uncorrected, that mismatch compounds
+  // across every character in a run: a long same-colored run (exactly what
+  // a state border or coastline draws as) drifts further off its true grid
+  // cell the longer the run goes, blurring/smearing braille dot detail
+  // that's supposed to line up pixel-for-pixel between neighboring cells.
+  // Scaling the whole run horizontally to its exact intended pixel width
+  // (targetW, precomputed by the caller from the same _colPx grid the
+  // backgrounds use) keeps one draw call per run -- preserving the merge
+  // that fixed the earlier lag -- while pinning every run back onto grid.
+  function _fillRun(ctx, runText, runX, y, targetW) {
+    // A run of plain spaces (the common case for radar/maps cells that only
+    // carry a background color, no glyph) paints nothing -- fillText() still
+    // costs a font-metrics lookup and a draw call for it regardless. Bailing
+    // out here skips that for every such run instead of just the ones that
+    // happen to get merged with real glyph runs.
+    if (runText.trim().length === 0) return
+    // A single character can't drift -- there's nothing for its position to
+    // compound against -- so it's not worth paying for measureText() plus
+    // the save/scale/restore bracket. Radar/maps frames are mostly exactly
+    // this case (many single-cell color changes; see the file-level comment
+    // above), so skipping it here matters for repaint cost, not just tidiness.
+    if (runText.length <= 1) {
+      ctx.fillText(runText, runX, y)
+      return
+    }
+    var measuredW = ctx.measureText(runText).width
+    if (measuredW > 0 && Math.abs(measuredW - targetW) > 0.01) {
+      ctx.save()
+      ctx.translate(runX, y)
+      ctx.scale(targetW / measuredW, 1)
+      ctx.fillText(runText, 0, 0)
+      ctx.restore()
+    } else {
+      ctx.fillText(runText, runX, y)
     }
   }
 }

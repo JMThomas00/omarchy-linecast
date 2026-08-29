@@ -103,21 +103,45 @@ BarWidget {
   // erase-screen/resets then cursor-home in another) but cursor-home alone
   // reliably appears exactly once per frame in both, and any trailing
   // erase/reset codes left dangling are harmless no-ops to Ansi.parseAnsi.
-  // See the SplitParser below for why this is used as a tail-scan marker
-  // rather than an actual split delimiter.
-  readonly property string frameMarker: "\u001b[H"
+  readonly property string frameMarker: "[H"
   property string activeTab: "radar"
-  property var activeLines: []
-  property bool haveFrame: false
-  readonly property bool activeTabLoading: !!root.currentProc && root.currentProc.running && !root.haveFrame
+
+  // Every tab gets its own `--live` process, started once when the panel
+  // opens and kept running for as long as it stays open, rather than being
+  // killed and respawned on every click. Switching tabs is then just
+  // changing which one's already-live output is shown -- instant, no
+  // process spawn, no waiting on linecast's own startup/data-fetch time --
+  // and a tab you haven't looked at in a while is still current (it kept
+  // redrawing in the background) instead of a stale snapshot from whenever
+  // you last visited it. Keyed by tabId; see ensureTabLive/stopTab/
+  // stopAllTabs below. Six concurrent lightweight CLI processes only while
+  // the popup is actually open is a reasonable trade for that.
+  property var tabProcs: ({})
+
+  function activeProc() {
+    return root.tabProcs[root.activeTab] || null
+  }
+  readonly property var activeLines: {
+    var p = root.tabProcs[root.activeTab]
+    return p ? p.lines : []
+  }
+  readonly property bool haveFrame: {
+    var p = root.tabProcs[root.activeTab]
+    return !!p && p.haveFrame
+  }
+  readonly property bool activeTabLoading: {
+    var p = root.tabProcs[root.activeTab]
+    return !!p && p.running && !p.haveFrame
+  }
 
   function showTab(tabId) {
     root.activeTab = tabId
-    startLive(tabId)
+    root.ensureTabLive(tabId)
   }
 
   function refreshActiveTab() {
-    startLive(root.activeTab)
+    root.stopTab(root.activeTab)
+    root.ensureTabLive(root.activeTab)
   }
 
   // Translates a key press into the bytes a real terminal would have sent,
@@ -126,18 +150,18 @@ BarWidget {
   // bubble up and close the panel instead of being swallowed here.
   function keyToBytes(event) {
     switch (event.key) {
-      case Qt.Key_Up: return "[A"
-      case Qt.Key_Down: return "[B"
-      case Qt.Key_Right: return "[C"
-      case Qt.Key_Left: return "[D"
+      case Qt.Key_Up: return "[A"
+      case Qt.Key_Down: return "[B"
+      case Qt.Key_Right: return "[C"
+      case Qt.Key_Left: return "[D"
       case Qt.Key_Return:
       case Qt.Key_Enter: return "\r"
-      case Qt.Key_Backspace: return "\u007f"
+      case Qt.Key_Backspace: return ""
       case Qt.Key_Tab: return "\t"
-      case Qt.Key_PageUp: return "[5~"
-      case Qt.Key_PageDown: return "[6~"
-      case Qt.Key_Home: return "[H"
-      case Qt.Key_End: return "[F"
+      case Qt.Key_PageUp: return "[5~"
+      case Qt.Key_PageDown: return "[6~"
+      case Qt.Key_Home: return "[H"
+      case Qt.Key_End: return "[F"
       case Qt.Key_Escape: return null
       default:
         if (event.text && event.text.length > 0 && event.text.charCodeAt(0) >= 0x20) return event.text
@@ -150,41 +174,20 @@ BarWidget {
   // renamed plugin folder) instead of only on the machine it was built on.
   readonly property string ptyRunPath: decodeURIComponent(Qt.resolvedUrl("ptyrun.py").toString().replace(/^file:\/\//, ""))
 
-  // A single reused Process/SplitParser can't tell a dying process's
-  // already-buffered trailing frame (pipe data outlives the writer) from
-  // the new one's first real frame -- a string flag comparing "which tab is
-  // this for" races the same way, since it's just as external to the data
-  // as the property it's guarding. `parent` inside the nested SplitParser
-  // doesn't help either: for a non-Item QtObject it resolves to the nearest
-  // visual ancestor (the plugin's own Loader), not the declaring Process.
-  // What actually can't race is a generation number baked into each
-  // instance at creation time via its own `procGen` property (read through
-  // the lexically-scoped `procInstance` id, visible to the nested onRead
-  // just like any other id in the same component): a superseded instance's
-  // procGen never changes, so it can never match a later root.liveGeneration.
-  property int liveGeneration: 0
-  property var currentProc: null
-
   Component {
     id: liveProcComponent
 
     Process {
       id: procInstance
       stdinEnabled: true
-      property int procGen: -1
-      property string buf: ""
+      property var lines: []
+      property bool haveFrame: false
+      property string buf: ""       // last fully-received frame, ready to paint
+      property string pending: ""   // frame currently being assembled
       property bool dirty: false
+      property real lastByteMs: 0   // 0 means "nothing pending to settle"
+
       stdout: SplitParser {
-        // Default (newline) splitting, not frameMarker: a fast view (radar)
-        // redraws every ~2s, so waiting for the *next* frameMarker to close
-        // off a chunk is fine, but a slow one (weather, moon, ...) can go a
-        // minute or more between redraws — the marker-delimited chunk would
-        // just never close in any reasonable time. Stream line-by-line
-        // instead and always track everything since the last frameMarker
-        // seen so far, whether or not that frame has finished drawing yet;
-        // a partial frame for one instant is harmless and self-corrects on
-        // the next line.
-        //
         // Only the buffer is updated here — parsing + repainting happens on
         // renderTimer's own schedule below, not once per line. During
         // interaction (drag-panning maps, radar's fast animation) lines can
@@ -192,67 +195,110 @@ BarWidget {
         // repainting the canvas that often was the actual source of the
         // reported lag, not the pty relay. Capping the render rate here
         // decouples "how often lines arrive" from "how often we do the
-        // expensive part," without dropping any data — buf always holds
-        // everything since the last frame boundary.
+        // expensive part."
+        //
+        // Two ways a frame gets promoted, not one: if a *second* marker
+        // shows up, the first frame is done -- cut precisely there, same as
+        // the original fix. That's the common case: radar actually redraws
+        // every ~150-200ms while scrubbing its animated playhead (measured
+        // directly), not the ~2s this comment used to assume, so a second
+        // marker is normally already here well before renderTimer's 50ms
+        // idle-settle check below would ever fire. Relying on idle-only
+        // measured as a real bug: if two full frames land inside the same
+        // ~50ms window (exactly what radar's fast redraws do), nothing cuts
+        // between them and they get promoted concatenated into one
+        // oversized, garbled `buf`. The idle-settle fallback exists purely
+        // for a view that may never send a second marker within any
+        // reasonable time (weather, moon, tides, sunshine, maps all redraw
+        // on the order of a minute or more) -- no marker cut is possible
+        // there since there's nothing to cut against.
         onRead: function(line) {
-          if (procInstance.procGen !== root.liveGeneration) return
-          procInstance.buf += line + "\n"
-          var idx = procInstance.buf.lastIndexOf(root.frameMarker)
-          if (idx === -1) return
-          if (idx > 0) procInstance.buf = procInstance.buf.slice(idx)
-          procInstance.dirty = true
+          procInstance.pending += line + "\n"
+          var first = procInstance.pending.indexOf(root.frameMarker)
+          if (first === -1) return
+          if (first > 0) procInstance.pending = procInstance.pending.slice(first)
+          var second = procInstance.pending.indexOf(root.frameMarker, 1)
+          if (second !== -1) {
+            procInstance.buf = procInstance.pending.slice(0, second)
+            procInstance.pending = procInstance.pending.slice(second)
+            procInstance.dirty = true
+            procInstance.lastByteMs = 0 // already promoted via a clean cut this round
+          } else {
+            procInstance.lastByteMs = Date.now() // no second marker yet -- idle-settle fallback below
+          }
         }
       }
     }
   }
 
-  // Parsing + repainting happens on this fixed schedule rather than once
-  // per line arrival (see the SplitParser comment above for why). A single
-  // persistent timer that polls whatever currentProc currently is, rather
-  // than one created per process instance, sidesteps the whole
-  // stale-instance problem for free: there's nothing to compare against, it
-  // only ever acts on the process that's current *right now*. Process
-  // itself has no default property, so a Timer can't be declared inline
-  // inside one anyway -- it has to live somewhere else regardless.
+  // Parses + repaints every live tab on a fixed schedule rather than once
+  // per line arrival (see the SplitParser comment above for why), and does
+  // so for *every* running tab each tick, not just the active one -- that's
+  // what keeps background tabs current while you're looking at a different
+  // one, instead of freezing them the moment they lose focus.
+  //
+  // A frame is promoted from `pending` to `buf` once linecast pauses
+  // writing for ~50ms, not once a *second* frame starts (an earlier version
+  // of this fix). That worked for radar -- redraws every ~2s, so the next
+  // frame's marker arrives almost immediately -- but meant a slow view
+  // (weather, moon, tides, sunshine, maps) that only redraws once a minute
+  // or more never showed anything at all until its *second* redraw
+  // happened. Every view's own frame transmission, however rarely it
+  // recurs, still completes in milliseconds over the local pty (confirmed
+  // directly: moon emits exactly one frameMarker in 8 full seconds of
+  // --live output), so a short quiet-period check catches "this frame is
+  // done" correctly regardless of how often that frame recurs, while still
+  // never painting a frame mid-write the way plain per-line promotion did.
   Timer {
     interval: 40 // ~25fps cap; plenty for a small preview pane
     running: true
     repeat: true
     onTriggered: {
-      var proc = root.currentProc
-      if (!proc || !proc.dirty) return
-      proc.dirty = false
-      var parsed = Ansi.parseAnsi(proc.buf)
-      if (parsed.length === 0 || (parsed.length === 1 && parsed[0].length === 0)) return
-      root.activeLines = parsed
-      root.haveFrame = true
+      var now = Date.now()
+      for (var tabId in root.tabProcs) {
+        var proc = root.tabProcs[tabId]
+        if (!proc) continue
+        if (proc.lastByteMs > 0 && proc.pending.length > 0 && (now - proc.lastByteMs) >= 50) {
+          proc.buf = proc.pending
+          proc.pending = ""
+          proc.dirty = true
+          proc.lastByteMs = 0
+        }
+        if (!proc.dirty) continue
+        proc.dirty = false
+        var parsed = Ansi.parseAnsi(proc.buf)
+        if (parsed.length === 0 || (parsed.length === 1 && parsed[0].length === 0)) continue
+        proc.lines = parsed
+        proc.haveFrame = true
+      }
     }
   }
 
-  function startLive(tabId) {
-    root.haveFrame = false
-    root.activeLines = []
-    root.liveGeneration++
-    if (root.currentProc) {
-      var old = root.currentProc
-      old.running = false
-      old.destroy()
-    }
-    var proc = liveProcComponent.createObject(root, { procGen: root.liveGeneration })
-    root.currentProc = proc
+  // No-op if tabId is already running -- safe to call on every showTab().
+  function ensureTabLive(tabId) {
+    if (root.tabProcs[tabId]) return
+    var proc = liveProcComponent.createObject(root, {})
     proc.command = ["python3", root.ptyRunPath,
       "--cols", String(root.termCols), "--rows", String(root.termRows),
       "--", "linecast", tabId, "--live", "--icons", "plain"]
     proc.running = true
+    var updated = Object.assign({}, root.tabProcs)
+    updated[tabId] = proc
+    root.tabProcs = updated // reassign (not mutate) so bindings on tabProcs re-evaluate
   }
 
-  function stopLive() {
-    if (root.currentProc) {
-      var old = root.currentProc
-      root.currentProc = null
-      old.running = false
-      old.destroy()
-    }
+  function stopTab(tabId) {
+    var proc = root.tabProcs[tabId]
+    if (!proc) return
+    proc.running = false
+    proc.destroy()
+    var updated = Object.assign({}, root.tabProcs)
+    delete updated[tabId]
+    root.tabProcs = updated
+  }
+
+  function stopAllTabs() {
+    for (var tabId in root.tabProcs) root.stopTab(tabId)
   }
 
   function switchPanel(direction) {
@@ -264,13 +310,24 @@ BarWidget {
   function openPanel() {
     panel.open = true
     root.refreshWeather()
-    root.startLive(root.activeTab)
+    // Start every tab now, not just the active one -- all six are already
+    // warm by the time you click over to any of them, not just the ones
+    // you happened to visit before. See the tabProcs comment above.
+    for (var i = 0; i < root.tabs.length; i++) root.ensureTabLive(root.tabs[i].id)
   }
   function closePanel() {
     panel.open = false
-    root.stopLive()
+    root.stopAllTabs()
   }
-  function togglePanel() { panel.open = !panel.open }
+  // Routes through open/closePanel() rather than flipping panel.open
+  // directly -- a plain click on the bar button is the normal way this
+  // panel opens, so it has to run the same warm-up (weather refresh, all
+  // six tabs starting) as the IPC/hotkey open() path, not just show an
+  // empty panel that only starts fetching once you click into a tab.
+  function togglePanel() {
+    if (panel.open) root.closePanel()
+    else root.openPanel()
+  }
 
   // Bar-widget contract for hotkey/summon routing (Bar.findPanelWidget wants
   // open/close/opened on the bar-widget root).
@@ -655,9 +712,10 @@ BarWidget {
               }
 
               function sendMouse(mx, my, btnCode, release) {
-                if (!root.currentProc || !root.currentProc.running) return null
+                var proc = root.activeProc()
+                if (!proc || !proc.running) return null
                 var cell = cellFor(mx, my)
-                root.currentProc.write("\u001b[<" + btnCode + ";" + cell.col + ";" + cell.row + (release ? "m" : "M"))
+                proc.write("\u001b[<" + btnCode + ";" + cell.col + ";" + cell.row + (release ? "m" : "M"))
                 return cell
               }
 
@@ -685,10 +743,11 @@ BarWidget {
               }
 
               Keys.onPressed: function(event) {
-                if (!root.currentProc || !root.currentProc.running) { event.accepted = false; return }
+                var proc = root.activeProc()
+                if (!proc || !proc.running) { event.accepted = false; return }
                 var bytes = root.keyToBytes(event)
                 if (bytes === null) { event.accepted = false; return }
-                root.currentProc.write(bytes)
+                proc.write(bytes)
                 event.accepted = true
               }
             }

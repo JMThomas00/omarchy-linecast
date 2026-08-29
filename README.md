@@ -62,21 +62,21 @@ Or manually:
 ```bash
 git clone https://github.com/JMThomas00/omarchy-linecast.git \
   ~/.config/omarchy/plugins/linecast
-omarchy plugin enable gh0st.linecast center
+omarchy plugin enable jmthomas00.linecast center
 ```
 
-Move it around the bar with `omarchy bar move gh0st.linecast --section <left|center|right>`.
+Move it around the bar with `omarchy bar move jmthomas00.linecast --section <left|center|right>`.
 
 ## Removal
 
 ```bash
-omarchy plugin remove gh0st.linecast
+omarchy plugin remove jmthomas00.linecast
 ```
 
 Or manually:
 
 ```bash
-omarchy plugin disable gh0st.linecast
+omarchy plugin disable jmthomas00.linecast
 rm -rf ~/.config/omarchy/plugins/linecast
 ```
 

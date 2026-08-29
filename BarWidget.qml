@@ -15,7 +15,7 @@ import "Ansi.js" as Ansi
 // reimplementing each view from scratch — radar's animation included.
 BarWidget {
   id: root
-  moduleName: "gh0st.linecast"
+  moduleName: "jmthomas00.linecast"
 
   readonly property var tabs: [
     { id: "weather", label: "Weather" },
@@ -387,7 +387,7 @@ BarWidget {
   }
 
   IpcHandler {
-    target: "gh0st.linecast"
+    target: "jmthomas00.linecast"
 
     function open(): void { root.openPanel() }
     function close(): void { root.closePanel() }

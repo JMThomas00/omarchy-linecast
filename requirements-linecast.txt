@@ -1,0 +1,12 @@
+# Pinned, hash-verified install for the `linecast` backend this plugin was
+# last reviewed against (see README.md -> Security -> Backend binding).
+# Hashes are the sdist and wheel published to PyPI for this exact release:
+# https://pypi.org/pypi/linecast/2.2.0/json
+#
+#   pip install --user --require-hashes -r requirements-linecast.txt
+#
+# `--require-hashes` fails closed if PyPI ever serves different bytes for
+# this version, or if a transitive dependency shows up unpinned.
+linecast==2.2.0 \
+    --hash=sha256:e4e5ac30ef859319977819e56aefbf658628bdabc09ba5dcdc1f8c2a39b49337 \
+    --hash=sha256:940876269fd7506acfc9c848ea3d361e77082ed18cf2335429bbd0ed17bd082d

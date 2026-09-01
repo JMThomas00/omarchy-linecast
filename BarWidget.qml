@@ -63,7 +63,12 @@ BarWidget {
 
   Process {
     id: weatherProc
-    command: ["bash", "-lc", "linecast weather --json"]
+    // Plain argv, no shell: the string was always static (no interpolated
+    // values), so `bash -lc` bought nothing but an extra process and an
+    // unnecessary shell-parsing step between us and the data. execvp
+    // resolves `linecast` via inherited PATH the same way the tab
+    // processes below already do without a shell.
+    command: ["linecast", "weather", "--json"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -83,7 +88,42 @@ BarWidget {
     onTriggered: root.refreshWeather()
   }
 
-  Component.onCompleted: root.refreshWeather()
+  // The backend `linecast` CLI is an independently installed dependency
+  // (see README's Requirements/Security sections) -- this plugin's
+  // reviewed commit never bundles or pins its code at install time, so a
+  // later `pip`/`pipx`/`uv` upgrade can silently change what actually
+  // runs behind this UI. This check makes that drift visible instead of
+  // invisible: it compares the installed CLI's own reported version
+  // against the release this plugin was last reviewed against and
+  // surfaces a banner (see panelColumn below) on mismatch. It's
+  // informational, not a hard block -- refusing to run over a patch bump
+  // would be worse for users than a visible warning, and this plugin has
+  // no ability to enforce what gets installed on its behalf.
+  readonly property string reviewedLinecastVersion: "2.2.0"
+  property string installedLinecastVersion: ""
+  readonly property string linecastVersionWarning: {
+    if (installedLinecastVersion === "" || installedLinecastVersion === reviewedLinecastVersion) return ""
+    return "⚠ linecast " + installedLinecastVersion + " is installed; this plugin was last reviewed against " +
+      reviewedLinecastVersion + ". See README → Security."
+  }
+
+  Process {
+    id: linecastVersionProc
+    command: ["linecast", "--version"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        // Matches this CLI's own `print(f"linecast {__version__}")`.
+        var m = /^linecast\s+(\S+)/.exec(text || "")
+        if (m) root.installedLinecastVersion = m[1]
+      }
+    }
+  }
+
+  Component.onCompleted: {
+    root.refreshWeather()
+    linecastVersionProc.running = true
+  }
 
   // ---- Tab data: linecast's own `--live` view, streamed frame-by-frame.
   //
@@ -543,6 +583,18 @@ BarWidget {
               }
             }
           }
+        }
+
+        Text {
+          visible: root.linecastVersionWarning !== ""
+          text: root.linecastVersionWarning
+          width: parent.width
+          wrapMode: Text.WordWrap
+          horizontalAlignment: Text.AlignHCenter
+          color: root.bar.foreground
+          opacity: 0.85
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
         }
 
         Text {

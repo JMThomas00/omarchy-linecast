@@ -30,6 +30,15 @@ function _colorEq(a, b) {
 // support either) -- out of scope here since it only affects a secondary
 // interactive extra, not the core dashboard views, all of which render
 // correctly without ever needing mid-frame repositioning.
+// Grid/cardinality caps applied while parsing, independent of whatever the
+// canvas actually goes on to draw (TermCanvas's own fixed gridCols/gridRows
+// only bound painting, not how much this function builds in memory first).
+// A real frame at BarWidget's 88x30 grid never comes close to either of
+// these -- they exist purely to bound a broken or adversarial stream, not
+// to constrain normal output.
+var MAX_LINES = 2000
+var MAX_LINE_CHARS = 4000
+
 function parseAnsi(raw) {
   var ESC = String.fromCharCode(27)
   var text = String(raw || "")
@@ -37,6 +46,7 @@ function parseAnsi(raw) {
   var curLine = []
   var fg = null, bg = null, bold = false
   var buf = ""
+  var lineChars = 0
 
   function flush() {
     if (buf.length > 0) {
@@ -49,6 +59,7 @@ function parseAnsi(raw) {
     flush()
     lines.push(curLine)
     curLine = []
+    lineChars = 0
   }
 
   function isCsiTerminator(code) {
@@ -57,6 +68,7 @@ function parseAnsi(raw) {
 
   var i = 0
   while (i < text.length) {
+    if (lines.length >= MAX_LINES) break // frame too tall to be real -- stop building more rows
     var ch = text.charAt(i)
 
     if (ch === ESC && text.charAt(i + 1) === '[') {
@@ -108,7 +120,7 @@ function parseAnsi(raw) {
 
     if (ch === '\n') { newline(); i++; continue }
     if (ch === '\r') { i++; continue }
-    buf += ch
+    if (lineChars < MAX_LINE_CHARS) { buf += ch; lineChars++ } // else: silently drop overflow for this row
     i++
   }
   flush()

@@ -42,27 +42,22 @@ If you find this useful, go star [linecast](https://github.com/ashuttl/linecast)
 - [Omarchy](https://omarchy.org/) (Quickshell-based bar/shell)
 - Python 3 (used only for a small pty-forwarding helper; no extra pip
   packages needed)
-- **[linecast](https://github.com/ashuttl/linecast)** `2.2.0` installed and
-  on your `PATH` — this is the exact release this plugin was last reviewed
-  against (see [Security](#security) below); a different version isn't
-  bundled, reviewed, or blocked, just flagged in the widget if it drifts.
-
-  Recommended, hash-verified install (fails closed if PyPI ever serves
-  different bytes for this release):
+- **[linecast](https://github.com/ashuttl/linecast)** `2.2.0`, installed
+  with the one command below — this is the exact release this plugin was
+  last reviewed against (see [Security](#security) below). This is the
+  only supported install method: the plugin resolves and hash-verifies the
+  installed package itself before every launch (never a bare PATH lookup),
+  and refuses to run at all if it isn't installed exactly this way.
 
   ```bash
   pip install --user --require-hashes -r requirements-linecast.txt
   ```
 
-  Quicker alternatives that pin the version but don't verify its hash:
-
-  ```bash
-  uv tool install linecast==2.2.0
-  pipx install linecast==2.2.0
-  pip install --user linecast==2.2.0
-  ```
-
-  Verify with `linecast --version`. This plugin will not work without it.
+  `--require-hashes` fails closed if PyPI ever serves different bytes for
+  this release. `uv tool install` / `pipx install` / a plain `pip install`
+  will get you a working `linecast` on your PATH, but **not** in a layout
+  or with hash coverage this plugin can verify — it will show a hard
+  "backend verification failed" banner and not run if installed that way.
 
 ## Installation
 
@@ -140,34 +135,64 @@ and how the two are bound together.
 
 `linecast` is installed by the user, separately from this plugin, from
 PyPI (see Requirements above) — the marketplace-reviewed commit of this
-repository controls none of the bytes that actually run as the backend,
-and a later `pip`/`pipx`/`uv` upgrade changes that silently. Two things
-address that:
+repository controls none of the bytes that actually run as the backend
+unless something actively verifies them at run time. It does:
 
 - **Hash-verified install**: `requirements-linecast.txt` pins the exact
   release this plugin was reviewed against (`2.2.0`) with the sha256
   hashes PyPI published for its sdist and wheel, installable with
-  `pip install --require-hashes`.
-- **Runtime drift check**: on open, the plugin runs `linecast --version`
-  and compares it against that same reviewed version. A mismatch shows a
-  banner in the popup naming both versions — informational, not a hard
-  block, since this plugin can't enforce what a user has installed and
-  refusing to run over an unrelated version bump would be worse than a
-  visible warning.
+  `pip install --require-hashes`. This is the only supported install path.
+- **Fail-closed runtime verification**: every single spawn of `linecast`
+  — every tab's `--live` process and the one-shot `weather --json` call —
+  goes through `ptyrun.py`'s `resolve_verified_linecast()`, which never
+  does a PATH lookup or trusts a self-reported `--version` string (either
+  is spoofable by any executable named `linecast` earlier on PATH). It
+  instead: (1) looks up the `linecast` distribution through Python's own
+  package database (`importlib.metadata`), refusing if it isn't installed
+  that way at all; (2) requires its recorded version to be exactly `2.2.0`;
+  (3) re-hashes every file pip installed for it — including the
+  console-script entry point about to be exec'd — against the sha256 pip
+  itself wrote into `RECORD` at install time, refusing on any mismatch;
+  and (4) execs the resolved, verified script path directly, never a bare
+  `linecast` argv0. Any failure at any of those steps is a hard block —
+  the popup shows why (see `linecastVersionWarning` in `BarWidget.qml`)
+  and no `linecast` process is spawned at all until it's fixed. This
+  check runs fresh on every spawn, in `ptyrun.py` itself; a cached "OK"
+  from the widget's own startup check is a UX convenience only and is
+  never what actually authorizes a spawn.
 
 ### Process boundary (PTY)
 
 Every `linecast <view> --live` process is spawned by `ptyrun.py` via
-`os.fork()` + `os.execvp()` with a fixed argv — never a shell, never a
-concatenated command string. `tabId` (the only variable part of that
-argv) comes from this file's own hardcoded six-entry tab list
-(`weather`/`radar`/`sunshine`/`moon`/`tides`/`maps`), not from anything a
-user types. `weatherProc`'s one-shot `linecast weather --json` call is the
-same: a plain argv list, no shell. `PR_SET_PDEATHSIG` plus `SIGTERM`/
-`SIGHUP` handlers guarantee both `ptyrun.py` and the `linecast` child it
-execs are killed on panel close, plugin disable, Quickshell exit, or a
-hard kill — confirmed directly during development that without this,
-killed sessions' process pairs were reparented to init and kept running
+`os.fork()` + `os.execv()` with a fixed argv — never a shell, never a
+concatenated command string — against the verified path from the backend
+binding check above. `tabId` (the only variable part of that argv) is
+validated by `isValidTab()` against this file's own hardcoded six-entry
+tab list (`weather`/`radar`/`sunshine`/`moon`/`tides`/`maps`) before it
+ever reaches `showTab()`/`ensureTabLive()`, including values arriving
+through the `IpcHandler`'s `selectTab()` — an unrecognized or
+option-looking value is rejected outright rather than reaching argv.
+`weatherProc`'s one-shot `linecast weather --json` call goes through the
+same `ptyrun.py` resolution (in its `--no-pty` mode) rather than a bare
+argv0, so it's covered by the same verification.
+
+Teardown is bounded and covers the whole process tree, not just the one
+child pid: the pty child calls `os.setsid()` right after fork (making it
+its own process-group leader), and `ptyrun.py`'s cleanup — run on
+`SIGTERM`/`SIGHUP` and on normal exit alike — signals that whole group,
+waits up to ~2s for it to actually exit, escalates to `SIGKILL` if it
+hasn't, and reaps it. `PR_SET_PDEATHSIG` is armed on both `ptyrun.py` and
+the child it forks, each immediately rechecking that its parent is still
+alive right after arming (closing the race where the parent had already
+exited in the window before the signal was armed, which would otherwise
+leave PDEATHSIG never firing at all). On the QML side, `stopTab()` stops
+exposing a tab's process as live immediately but only destroys the QML
+object once `ptyrun.py` confirms the process actually exited, instead of
+tearing it down while that bounded cleanup is still in flight underneath
+it. Together this guarantees no `ptyrun.py`/`linecast` pair outlives panel
+close, plugin disable, Quickshell exit, or a hard kill — confirmed
+directly during development that without the PDEATHSIG piece, killed
+sessions' process pairs were reparented to init and kept running
 indefinitely.
 
 ### Input boundary
@@ -198,15 +223,34 @@ sequences itself (to supply Omarchy's theme colors); every other OSC
 sequence passes through unmodified to the parser above, which discards it
 the same way.
 
+Both the transport and the parser are also byte/cardinality-bounded, not
+just content-filtered: `BarWidget.qml`'s frame assembler kills a tab's
+process outright if a single pty stream accumulates more than 1MB without
+a frame boundary ever showing up (`maxPendingBytes`), the one-shot weather
+fetch discards anything over 1MB before it ever reaches `JSON.parse`
+(`maxJsonBytes`), and `Ansi.parseAnsi` itself caps a parsed frame to 2000
+rows and 4000 characters per row (`MAX_LINES`/`MAX_LINE_CHARS`) regardless
+of what the canvas grid ends up displaying — so a stream that never emits
+the frame markers or record separators a well-behaved `linecast` always
+does can't grow this plugin's own memory use without bound.
+
 ### File boundary
 
 The only file this plugin's code reads is
-`~/.local/state/omarchy/current/theme/colors.toml` — a fixed path under
-the user's own state directory, parsed with a narrow key/value regex,
-never executed or passed to a shell, and used only to answer OSC color
-queries (see Output boundary). Neither `ptyrun.py` nor the QML/JS here
-write, create, or delete any file. Removal (see above) only ever deletes
-this plugin's own install directory.
+`~/.local/state/omarchy/current/theme/colors.toml`. `current` is meant to
+be a symlink (that's how Omarchy's theme switcher repoints the active
+theme), so the parent directory chain is deliberately not restricted to
+regular files — but the leaf file itself is opened as one atomic, fd-based
+`open()` with `O_NOFOLLOW` (refuses if that exact path is a symlink) and
+`O_NONBLOCK` (so a FIFO with no writer can't hang the open), then checked
+via `fstat()` on the resulting descriptor — not a separate, spoofable
+path-based `stat()` — to confirm it's a regular file owned by the current
+user before a single byte is read, with the read itself bounded to 64KB
+regardless. It's parsed with a narrow key/value regex, never executed or
+passed to a shell, and used only to answer OSC color queries (see Output
+boundary). Neither `ptyrun.py` nor the QML/JS here write, create, or
+delete any file. Removal (see above) only ever deletes this plugin's own
+install directory.
 
 ## License
 

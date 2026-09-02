@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jmthomas00.linecast",
   "name": "Linecast",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "Jordan Thomas (JMThomas00)",
   "license": "MIT",
   "description": "Companion to the Omarchy weather widget, backed by the linecast CLI (https://github.com/ashuttl/linecast): one popup with all six of linecast's views — Weather, Radar, Sunshine, Moon, Tides, and Maps — replayed live from its own terminal output, with real keyboard and mouse input forwarded back into it, not reimplemented or simulated.",

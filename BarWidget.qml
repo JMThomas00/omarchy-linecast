@@ -57,23 +57,32 @@ BarWidget {
     return isNaN(d.getTime()) ? "" : Qt.formatDate(d, "dddd")
   }
 
+  // A legitimate weather --json payload is a few KB; capping well above
+  // that before ever handing text to JSON.parse means a backend that goes
+  // wrong (or is impersonated) can't force this widget to parse or retain
+  // an unbounded string.
+  readonly property int maxJsonBytes: 1048576
+
   function refreshWeather() {
+    if (!root.backendOk) return
     if (!weatherProc.running) weatherProc.running = true
   }
 
   Process {
     id: weatherProc
-    // Plain argv, no shell: the string was always static (no interpolated
-    // values), so `bash -lc` bought nothing but an extra process and an
-    // unnecessary shell-parsing step between us and the data. execvp
-    // resolves `linecast` via inherited PATH the same way the tab
-    // processes below already do without a shell.
-    command: ["linecast", "weather", "--json"]
+    // Routed through ptyrun.py's --no-pty mode (plain argv, no shell, no
+    // pty needed for a one-shot call) rather than a bare `linecast` argv0:
+    // that resolves and hash-verifies the installed backend the same way
+    // the tab processes below do, instead of trusting whatever `linecast`
+    // PATH lookup happens to find. See ptyrun.py's resolve_verified_linecast().
+    command: ["python3", root.ptyRunPath, "--no-pty", "--", "linecast", "weather", "--json"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        var t = text || ""
+        if (t.length > root.maxJsonBytes) return // oversized/malformed -- keep last-good data
         try {
-          root.weatherData = JSON.parse(text || "{}")
+          root.weatherData = JSON.parse(t || "{}")
         } catch (e) {
           // keep last-good data visible
         }
@@ -89,40 +98,50 @@ BarWidget {
   }
 
   // The backend `linecast` CLI is an independently installed dependency
-  // (see README's Requirements/Security sections) -- this plugin's
-  // reviewed commit never bundles or pins its code at install time, so a
-  // later `pip`/`pipx`/`uv` upgrade can silently change what actually
-  // runs behind this UI. This check makes that drift visible instead of
-  // invisible: it compares the installed CLI's own reported version
-  // against the release this plugin was last reviewed against and
-  // surfaces a banner (see panelColumn below) on mismatch. It's
-  // informational, not a hard block -- refusing to run over a patch bump
-  // would be worse for users than a visible warning, and this plugin has
-  // no ability to enforce what gets installed on its behalf.
-  readonly property string reviewedLinecastVersion: "2.2.0"
-  property string installedLinecastVersion: ""
+  // (see README's Requirements/Security sections). Rather than trusting a
+  // bare PATH lookup plus whatever version string the resolved executable
+  // prints (spoofable by any script named `linecast` earlier on PATH),
+  // every actual spawn is resolved and hash-verified by ptyrun.py against
+  // the pinned, reviewed release -- see resolve_verified_linecast() there.
+  // This check is the UI-facing mirror of that: run once at startup so the
+  // panel can show a clear, hard-blocked reason instead of silently never
+  // loading, and gate refreshWeather()/ensureTabLive() on it so we don't
+  // bother spawning processes ptyrun.py would refuse anyway. It is not the
+  // security boundary itself -- ptyrun.py re-verifies on every single
+  // spawn regardless of this cached flag, so a stale "OK" here can't let
+  // anything unverified actually run.
+  property bool backendChecked: false
+  property bool backendOk: false
+  property string backendVersion: ""
+  property string backendBlockReason: ""
   readonly property string linecastVersionWarning: {
-    if (installedLinecastVersion === "" || installedLinecastVersion === reviewedLinecastVersion) return ""
-    return "⚠ linecast " + installedLinecastVersion + " is installed; this plugin was last reviewed against " +
-      reviewedLinecastVersion + ". See README → Security."
+    if (!backendChecked || backendOk) return ""
+    return "⚠ linecast backend verification failed: " + backendBlockReason +
+      ". This plugin will not run until this is fixed — see README → Security."
   }
 
   Process {
-    id: linecastVersionProc
-    command: ["linecast", "--version"]
+    id: linecastVerifyProc
+    command: ["python3", root.ptyRunPath, "--verify-only"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        // Matches this CLI's own `print(f"linecast {__version__}")`.
-        var m = /^linecast\s+(\S+)/.exec(text || "")
-        if (m) root.installedLinecastVersion = m[1]
+        var t = (text || "").trim()
+        root.backendChecked = true
+        if (t.indexOf("OK ") === 0) {
+          root.backendOk = true
+          root.backendVersion = t.slice(3)
+          root.refreshWeather()
+        } else {
+          root.backendOk = false
+          root.backendBlockReason = t.indexOf("FAIL ") === 0 ? t.slice(5) : "verification check failed"
+        }
       }
     }
   }
 
   Component.onCompleted: {
-    root.refreshWeather()
-    linecastVersionProc.running = true
+    linecastVerifyProc.running = true
   }
 
   // ---- Tab data: linecast's own `--live` view, streamed frame-by-frame.
@@ -145,6 +164,15 @@ BarWidget {
   // erase/reset codes left dangling are harmless no-ops to Ansi.parseAnsi.
   readonly property string frameMarker: root._esc + "[H"
   property string activeTab: "radar"
+
+  // A real frame at termCols x termRows with truecolor SGR runs before
+  // nearly every cell is at most tens of KB. This is a producer/framer
+  // byte ceiling, not a content-size guess: if a tab's pty output never
+  // delivers a second frameMarker (or a 50ms idle gap) long enough for
+  // `pending` to cross this, something is wrong with the stream, and
+  // holding it in an ever-growing QML string is the actual risk -- so the
+  // proc is killed outright rather than left accumulating.
+  readonly property int maxPendingBytes: 1048576
 
   // Every tab gets its own `--live` process, started once when the panel
   // opens and kept running for as long as it stays open, rather than being
@@ -174,7 +202,22 @@ BarWidget {
     return !!p && p.running && !p.haveFrame
   }
 
+  // The only place `tabId` should ever be allowed to originate from outside
+  // this file's own hardcoded `tabs` list -- the IpcHandler's selectTab()
+  // below hands it whatever string an external `qs ipc call` invocation
+  // passes, unvalidated. Without this, that string flowed straight through
+  // showTab() -> ensureTabLive() into the `linecast` argv, so an
+  // option-looking value (anything starting with "-") could land in argv
+  // ahead of the fixed "--live" flag instead of being rejected outright.
+  function isValidTab(tabId) {
+    for (var i = 0; i < root.tabs.length; i++) {
+      if (root.tabs[i].id === tabId) return true
+    }
+    return false
+  }
+
   function showTab(tabId) {
+    if (!root.isValidTab(tabId)) return
     root.activeTab = tabId
     root.ensureTabLive(tabId)
   }
@@ -236,6 +279,7 @@ BarWidget {
     Process {
       id: procInstance
       stdinEnabled: true
+      property string tabId: ""
       property var lines: []
       property bool haveFrame: false
       property string buf: ""       // last fully-received frame, ready to paint
@@ -289,6 +333,15 @@ BarWidget {
         // there since there's nothing to cut against.
         onRead: function(line) {
           procInstance.pending += line + "\n"
+          if (procInstance.pending.length > root.maxPendingBytes) {
+            // No frame boundary has shown up across an unreasonable amount
+            // of output -- stop trusting this stream rather than keep
+            // growing an unbounded buffer. stopTab()/onExited below tear
+            // it down properly; ensureTabLive() will spawn a fresh one the
+            // next time this tab is shown or refreshed.
+            root.stopTab(procInstance.tabId)
+            return
+          }
           var first = procInstance.pending.indexOf(root.frameMarker)
           if (first === -1) return
           if (first > 0) procInstance.pending = procInstance.pending.slice(first)
@@ -303,6 +356,20 @@ BarWidget {
             procInstance.lastByteMs = Date.now() // no second marker yet -- idle-settle fallback below
           }
         }
+      }
+
+      onExited: function(exitCode, exitStatus) {
+        // Only destroy once the process has actually confirmed exit --
+        // ptyrun.py's own teardown waits up to ~2s for the whole process
+        // group to die before escalating to SIGKILL, so destroying this
+        // object any earlier (the old stopTab() did so synchronously)
+        // would tear down its buffers while that cleanup was still in
+        // flight underneath it. Also covers an unrequested exit (crash,
+        // or the oversize-buffer kill above) by making sure the tab is no
+        // longer referenced from tabProcs either way, so ensureTabLive()
+        // is free to start a fresh one next time this tab is shown.
+        if (root.tabProcs[procInstance.tabId] === procInstance) root._dropTabProc(procInstance.tabId)
+        procInstance.destroy()
       }
     }
   }
@@ -352,8 +419,10 @@ BarWidget {
 
   // No-op if tabId is already running -- safe to call on every showTab().
   function ensureTabLive(tabId) {
+    if (!root.backendOk) return
+    if (!root.isValidTab(tabId)) return
     if (root.tabProcs[tabId]) return
-    var proc = liveProcComponent.createObject(root, {})
+    var proc = liveProcComponent.createObject(root, { tabId: tabId })
     proc.command = ["python3", root.ptyRunPath,
       "--cols", String(root.termCols), "--rows", String(root.termRows),
       "--", "linecast", tabId, "--live", "--icons", "plain"]
@@ -363,14 +432,22 @@ BarWidget {
     root.tabProcs = updated // reassign (not mutate) so bindings on tabProcs re-evaluate
   }
 
-  function stopTab(tabId) {
-    var proc = root.tabProcs[tabId]
-    if (!proc) return
-    proc.running = false
-    proc.destroy()
+  // Removes tabId from the map bindings read from, without touching the
+  // Process object itself -- see liveProcComponent's onExited, which is
+  // what actually destroys it once exit is confirmed.
+  function _dropTabProc(tabId) {
+    if (!(tabId in root.tabProcs)) return
     var updated = Object.assign({}, root.tabProcs)
     delete updated[tabId]
     root.tabProcs = updated
+  }
+
+  function stopTab(tabId) {
+    var proc = root.tabProcs[tabId]
+    if (!proc) return
+    root._dropTabProc(tabId) // stop treating it as this tab's live process immediately...
+    proc.running = false     // ...but let onExited destroy it once ptyrun.py confirms the
+                              // whole process group actually terminated, not before.
   }
 
   function stopAllTabs() {

@@ -44,20 +44,27 @@ If you find this useful, go star [linecast](https://github.com/ashuttl/linecast)
   packages needed)
 - **[linecast](https://github.com/ashuttl/linecast)** `2.2.0`, installed
   with the one command below — this is the exact release this plugin was
-  last reviewed against (see [Security](#security) below). This is the
-  only supported install method: the plugin resolves and hash-verifies the
-  installed package itself before every launch (never a bare PATH lookup),
-  and refuses to run at all if it isn't installed exactly this way.
+  last reviewed against (see [Security](#security) below). The plugin
+  resolves and hash-verifies the installed package itself before every
+  launch (never a bare PATH lookup, never a self-reported version string),
+  and refuses to run at all on any mismatch.
 
   ```bash
   pip install --user --require-hashes -r requirements-linecast.txt
   ```
 
   `--require-hashes` fails closed if PyPI ever serves different bytes for
-  this release. `uv tool install` / `pipx install` / a plain `pip install`
-  will get you a working `linecast` on your PATH, but **not** in a layout
-  or with hash coverage this plugin can verify — it will show a hard
-  "backend verification failed" banner and not run if installed that way.
+  this release — this is the one recommended, fully hash-bound install
+  path. Verification itself isn't tied to that one install *method*,
+  though: it resolves whatever `linecast` your shell's PATH actually
+  finds, then hash-verifies that exact file against the installed
+  package's own install-time record — which works the same way whether
+  that installer was `pip`, `uv tool install`, or `pipx`, each of which
+  writes the same kind of per-file hash record. What actually matters is
+  that the *installed version* is exactly `2.2.0` with byte-identical
+  files; an unpinned `uv tool install linecast` or similar that happens to
+  land on a different version will still show a hard "backend
+  verification failed" banner and not run until it matches.
 
 ## Installation
 
@@ -141,25 +148,32 @@ unless something actively verifies them at run time. It does:
 - **Hash-verified install**: `requirements-linecast.txt` pins the exact
   release this plugin was reviewed against (`2.2.0`) with the sha256
   hashes PyPI published for its sdist and wheel, installable with
-  `pip install --require-hashes`. This is the only supported install path.
+  `pip install --require-hashes`. This is the one recommended, fully
+  hash-bound install command.
 - **Fail-closed runtime verification**: every single spawn of `linecast`
   — every tab's `--live` process and the one-shot `weather --json` call —
   goes through `ptyrun.py`'s `resolve_verified_linecast()`, which never
-  does a PATH lookup or trusts a self-reported `--version` string (either
-  is spoofable by any executable named `linecast` earlier on PATH). It
-  instead: (1) looks up the `linecast` distribution through Python's own
-  package database (`importlib.metadata`), refusing if it isn't installed
-  that way at all; (2) requires its recorded version to be exactly `2.2.0`;
-  (3) re-hashes every file pip installed for it — including the
-  console-script entry point about to be exec'd — against the sha256 pip
-  itself wrote into `RECORD` at install time, refusing on any mismatch;
-  and (4) execs the resolved, verified script path directly, never a bare
-  `linecast` argv0. Any failure at any of those steps is a hard block —
-  the popup shows why (see `linecastVersionWarning` in `BarWidget.qml`)
-  and no `linecast` process is spawned at all until it's fixed. This
-  check runs fresh on every spawn, in `ptyrun.py` itself; a cached "OK"
-  from the widget's own startup check is a UX convenience only and is
-  never what actually authorizes a spawn.
+  trusts a self-reported `--version` string (spoofable by any executable
+  named `linecast` earlier on PATH). It uses PATH only to find a
+  *candidate* file to check, never as a basis for trust: (1) resolves
+  `linecast` on PATH to a real file, then looks up the `linecast`
+  distribution that installed it through Python's own package database
+  (`importlib.metadata`) — searched both in the default (`pip install
+  --user`) location and, if the resolved file lives inside a venv (as
+  `uv tool install`/`pipx install` each create one per tool), that venv's
+  own site-packages — refusing if no such distribution is found; (2)
+  requires its recorded version to be exactly `2.2.0`; (3) re-hashes every
+  file the installer wrote for it — including the console-script entry
+  point about to be exec'd — against the sha256 it recorded in `RECORD` at
+  install time, refusing on any mismatch; (4) confirms the original PATH
+  candidate is itself one of those verified files; and (5) only then execs
+  that resolved, verified path directly, never a bare `linecast` argv0.
+  Any failure at any of those steps is a hard block — the popup shows why
+  (see `linecastVersionWarning` in `BarWidget.qml`) and no `linecast`
+  process is spawned at all until it's fixed. This check runs fresh on
+  every spawn, in `ptyrun.py` itself; a cached "OK" from the widget's own
+  startup check is a UX convenience only and is never what actually
+  authorizes a spawn.
 
 ### Process boundary (PTY)
 

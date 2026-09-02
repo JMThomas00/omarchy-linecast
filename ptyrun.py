@@ -30,11 +30,11 @@ import os
 import pty
 import re
 import select
+import shutil
 import signal
 import stat
 import struct
 import sys
-import sysconfig
 import termios
 import time
 
@@ -61,35 +61,90 @@ def _file_hash_ok(filehash, data):
     return computed == filehash.value
 
 
+def _find_pyvenv_root(script_path):
+    """Walk upward from a resolved script path looking for the venv it
+    belongs to, marked by a pyvenv.cfg at the venv root (one level above
+    bin/). Covers `uv tool install` and `pipx install`, which each create
+    one isolated venv per tool -- distinct from `pip install --user`'s
+    shared user site-packages, which importlib.metadata's default search
+    already covers without this. Returns None if no venv is found within a
+    few levels (i.e. probably a user-site/system install instead)."""
+    d = os.path.dirname(script_path)
+    for _ in range(4):
+        if os.path.isfile(os.path.join(d, "pyvenv.cfg")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
+def _venv_site_packages(venv_root):
+    lib = os.path.join(venv_root, "lib")
+    if os.path.isdir(lib):
+        for name in sorted(os.listdir(lib)):
+            candidate = os.path.join(lib, name, "site-packages")
+            if os.path.isdir(candidate):
+                return candidate
+    candidate = os.path.join(venv_root, "Lib", "site-packages")  # Windows layout
+    return candidate if os.path.isdir(candidate) else None
+
+
 def resolve_verified_linecast():
     """Resolve the exact `linecast` executable to run and verify its
     installed identity, rather than trusting a bare `linecast` on PATH plus
     whatever version string it prints (a different executable earlier on
-    PATH can print anything it likes). Three checks, all of which must pass
-    before anything is ever exec'd:
+    PATH can print anything it likes). PATH is used only to find a
+    *candidate* file to inspect -- trust comes entirely from the checks
+    below, all of which must pass before anything is ever exec'd:
 
-      1. A `linecast` distribution is actually installed, found via pip's
-         own package database (importlib.metadata), never via PATH lookup.
-      2. Its recorded version is exactly the one this plugin was reviewed
-         against.
-      3. Every file pip installed for it -- including the console-script
-         entry point we're about to exec -- still matches the sha256 hash
-         pip itself wrote into RECORD at install time, so a file swapped in
-         after installation (accidentally or otherwise) is caught instead
-         of silently executed.
-
-    Only a `pip install --user --require-hashes` install (see README) is
-    supported -- that's the one layout whose console-script location is
-    both deterministic and covered by hash-verified RECORD entries.
+      1. That candidate resolves to a real, on-disk file.
+      2. It belongs to a `linecast` distribution discoverable through
+         Python's own package database (importlib.metadata) -- checked
+         both in the default search path (covers `pip install --user`)
+         and, if the candidate lives inside a venv (covers `uv tool
+         install` / `pipx install`, which each use one isolated venv per
+         tool), in that venv's own site-packages.
+      3. That distribution's recorded version is exactly the one this
+         plugin was reviewed against.
+      4. Every file installed for it -- including the console-script entry
+         point we're about to exec -- still matches the sha256 hash the
+         installer itself wrote into RECORD at install time, so a file
+         swapped in after installation (accidentally or otherwise) is
+         caught instead of silently executed.
+      5. The original candidate file is itself one of those hash-verified
+         files, not just something happening to sit near a valid install.
 
     Returns (True, absolute_script_path, version) on success, or
     (False, reason, None) on any failure -- the caller must refuse to run
-    linecast at all in that case, never fall back to a PATH lookup.
+    linecast at all in that case.
     """
-    try:
-        dist = importlib_metadata.distribution(EXPECTED_DIST)
-    except importlib_metadata.PackageNotFoundError:
+    candidate = shutil.which(EXPECTED_DIST)
+    if candidate is None:
         return False, "linecast is not installed (see README -> Requirements)", None
+    candidate = os.path.realpath(candidate)
+    if not os.path.isfile(candidate):
+        return False, f"linecast on PATH does not resolve to a real file: {candidate}", None
+
+    venv_root = _find_pyvenv_root(candidate)
+    search_path = None
+    if venv_root is not None:
+        site_packages = _venv_site_packages(venv_root)
+        if site_packages is None:
+            return False, f"could not locate site-packages under venv {venv_root}", None
+        search_path = [site_packages]
+
+    try:
+        if search_path is not None:
+            dist = next(iter(importlib_metadata.distributions(name=EXPECTED_DIST, path=search_path)))
+        else:
+            dist = importlib_metadata.distribution(EXPECTED_DIST)
+    except (importlib_metadata.PackageNotFoundError, StopIteration):
+        return False, (
+            f"linecast on PATH ({candidate}) is not backed by a discoverable "
+            f"linecast package installation"
+        ), None
 
     if dist.version != EXPECTED_VERSION:
         return False, (
@@ -118,17 +173,13 @@ def resolve_verified_linecast():
             return False, f"installed file does not match its recorded install-time hash: {path_str}", None
         verified_paths.add(os.path.realpath(path_str))
 
-    scheme = "posix_user" if os.name != "nt" else "nt_user"
-    scripts_dir = os.path.realpath(sysconfig.get_path("scripts", scheme))
-    script_path = os.path.join(scripts_dir, "linecast")
-    if os.path.realpath(script_path) not in verified_paths:
+    if candidate not in verified_paths:
         return False, (
-            f"linecast console script not found among hash-verified installed "
-            f"files at {script_path} -- only `pip install --user "
-            f"--require-hashes -r requirements-linecast.txt` is supported"
+            f"linecast on PATH ({candidate}) is not among linecast "
+            f"{EXPECTED_VERSION}'s own hash-verified installed files"
         ), None
 
-    return True, script_path, dist.version
+    return True, candidate, dist.version
 
 
 # ---- Orphan protection -------------------------------------------------

@@ -6,6 +6,7 @@ Radar, Sunshine, Moon, Tides, and Maps — live and interactive in one
 popup, right from the menu bar.
 
 ![Screenshot](screenshot.png)
+![Demo](demo.gif)
 
 ## Credit
 

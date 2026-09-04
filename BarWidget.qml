@@ -512,12 +512,40 @@ BarWidget {
     function selectTab(tab: string): void { root.showTab(tab) }
   }
 
+  // Which bar section (left/center/right) this widget's own icon currently
+  // sits in — read from shell.json's persisted layout via `bar.layoutConfig`
+  // (`{left:[{id},...], center:[...], right:[...]}`), the same source
+  // `plugins/bar/widgets/Tray.qml` reads for its own (unrelated) ownership
+  // check — there's no `bar.section`/`bar.region` property handed to a
+  // widget directly. Reactive: `layoutConfig` itself updates when the user
+  // drags an icon to a different section, so this follows without needing
+  // a restart.
+  function _currentBarSection() {
+    var layout = root.bar && root.bar.layoutConfig ? root.bar.layoutConfig : null
+    if (!layout) return "center"
+    var sections = ["left", "center", "right"]
+    for (var i = 0; i < sections.length; i++) {
+      var list = layout[sections[i]]
+      if (!Array.isArray(list)) continue
+      for (var j = 0; j < list.length; j++) {
+        if (list[j] && list[j].id === root.moduleName) return sections[i]
+      }
+    }
+    return "center"
+  }
+  readonly property string barSection: root._currentBarSection()
+
   KeyboardPanel {
     id: panel
     anchorItem: button
     owner: root
     bar: root.bar
-    centerOnBar: true
+    // Mimics the native bar plugins' own left/center/right popup placement
+    // convention: a center-section icon centers on the whole screen
+    // (`centerOnBar: true`); a left/right-section icon instead centers
+    // under its own icon position and lets KeyboardPanel's existing
+    // screen-edge clamp (`cardOrigin`) pull it flush to that edge.
+    centerOnBar: root.barSection === "center"
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(660))
     contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight, Style.space(660))

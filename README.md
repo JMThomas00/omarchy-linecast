@@ -5,7 +5,6 @@ temperature in the bar, and opens all six of linecast's views — Weather,
 Radar, Sunshine, Moon, Tides, and Maps — live and interactive in one
 popup, right from the menu bar.
 
-![Screenshot](screenshot.png)
 ![Demo](demo.gif)
 
 ## Credit

@@ -57,14 +57,18 @@ If you find this useful, go star [linecast](https://github.com/ashuttl/linecast)
   this release — this is the one recommended, fully hash-bound install
   path. Verification itself isn't tied to that one install *method*,
   though: it resolves whatever `linecast` your shell's PATH actually
-  finds, then hash-verifies that exact file against the installed
-  package's own install-time record — which works the same way whether
-  that installer was `pip`, `uv tool install`, or `pipx`, each of which
-  writes the same kind of per-file hash record. What actually matters is
-  that the *installed version* is exactly `2.2.0` with byte-identical
-  files; an unpinned `uv tool install linecast` or similar that happens to
-  land on a different version will still show a hard "backend
-  verification failed" banner and not run until it matches.
+  finds, then hash-verifies that exact file against
+  `linecast-2.2.0.manifest.json` — a file *this repository ships and was
+  reviewed at*, generated once from the official PyPI release, not
+  against anything the installed environment self-reports — which works
+  the same way whether the installer was `pip`, `uv tool install`, or
+  `pipx`. What actually matters is that the *installed version* is
+  exactly `2.2.0` with byte-identical files matching that committed
+  manifest; an unpinned `uv tool install linecast` or similar that lands
+  on a different (even same-version) artifact will still show a hard
+  "backend verification failed" banner and not run until it matches. See
+  [Security → Backend binding](#backend-binding) for why this changed
+  from hashing against the installed package's own record.
 
 ## Installation
 
@@ -150,6 +154,22 @@ unless something actively verifies them at run time. It does:
   hashes PyPI published for its sdist and wheel, installable with
   `pip install --require-hashes`. This is the one recommended, fully
   hash-bound install command.
+- **A committed trust root, not the installed environment's own word
+  about itself**: `linecast-2.2.0.manifest.json` in this repository — not
+  anything read from wherever `linecast` ends up installed — is what
+  every hash comparison below is made against. It's generated once,
+  directly from the official `linecast-2.2.0` wheel published to PyPI
+  (the same artifact `requirements-linecast.txt` pins by hash), and lists
+  the sha256 of every file that wheel actually contains, plus its
+  `console_scripts` entry point (`linecast.__main__:main`). An earlier
+  version of this check instead re-hashed installed files against that
+  same installation's own `RECORD` — which is written by whatever did the
+  installing, so an unpinned `uv tool install`/`pipx install` of a
+  *different* `linecast` 2.2.0 artifact could self-report a consistent
+  but unreviewed `RECORD` and pass. Hashing against a manifest shipped and
+  reviewed at this plugin's own commit closes that gap: the bytes have to
+  match what was actually reviewed, not just be internally consistent
+  with each other.
 - **Fail-closed runtime verification**: every single spawn of `linecast`
   — every tab's `--live` process and the one-shot `weather --json` call —
   goes through `ptyrun.py`'s `resolve_verified_linecast()`, which never
@@ -162,18 +182,28 @@ unless something actively verifies them at run time. It does:
   --user`) location and, if the resolved file lives inside a venv (as
   `uv tool install`/`pipx install` each create one per tool), that venv's
   own site-packages — refusing if no such distribution is found; (2)
-  requires its recorded version to be exactly `2.2.0`; (3) re-hashes every
-  file the installer wrote for it — including the console-script entry
-  point about to be exec'd — against the sha256 it recorded in `RECORD` at
-  install time, refusing on any mismatch; (4) confirms the original PATH
-  candidate is itself one of those verified files; and (5) only then execs
-  that resolved, verified path directly, never a bare `linecast` argv0.
-  Any failure at any of those steps is a hard block — the popup shows why
-  (see `linecastVersionWarning` in `BarWidget.qml`) and no `linecast`
-  process is spawned at all until it's fixed. This check runs fresh on
-  every spawn, in `ptyrun.py` itself; a cached "OK" from the widget's own
-  startup check is a UX convenience only and is never what actually
-  authorizes a spawn.
+  requires its recorded version to match the manifest's (`2.2.0`); (3)
+  re-hashes every file the distribution claims to own against the sha256
+  pinned for that exact relative path in the manifest, refusing on any
+  mismatch, any file the manifest doesn't recognize, or any manifest file
+  missing from the installation (installer-only bookkeeping like
+  `RECORD`/`INSTALLER`/`direct_url.json` is exempted — it's never imported
+  or executed); (4) separately verifies the console-script launcher about
+  to be exec'd, which isn't one of the distribution's own files so step 3
+  can't cover it — its shebang must name a real python interpreter inside
+  that same venv (checked against the literal shebang path, not fully
+  resolved, since a venv's own `bin/python` is itself normally a symlink
+  out to the base interpreter), and its entire body must do nothing but
+  import and call the manifest's pinned `module:attr` entry point, parsed
+  and checked statement-by-statement — any additional import, call, or
+  statement is a hard failure rather than something silently allowed
+  through; and (5) only then execs that resolved, verified path directly,
+  never a bare `linecast` argv0. Any failure at any of those steps is a
+  hard block — the popup shows why (see `linecastVersionWarning` in
+  `BarWidget.qml`) and no `linecast` process is spawned at all until it's
+  fixed. This check runs fresh on every spawn, in `ptyrun.py` itself; a
+  cached "OK" from the widget's own startup check is a UX convenience only
+  and is never what actually authorizes a spawn.
 
 ### Process boundary (PTY)
 
@@ -238,15 +268,28 @@ sequence passes through unmodified to the parser above, which discards it
 the same way.
 
 Both the transport and the parser are also byte/cardinality-bounded, not
-just content-filtered: `BarWidget.qml`'s frame assembler kills a tab's
-process outright if a single pty stream accumulates more than 1MB without
-a frame boundary ever showing up (`maxPendingBytes`), the one-shot weather
-fetch discards anything over 1MB before it ever reaches `JSON.parse`
-(`maxJsonBytes`), and `Ansi.parseAnsi` itself caps a parsed frame to 2000
-rows and 4000 characters per row (`MAX_LINES`/`MAX_LINE_CHARS`) regardless
-of what the canvas grid ends up displaying — so a stream that never emits
-the frame markers or record separators a well-behaved `linecast` always
-does can't grow this plugin's own memory use without bound.
+just content-filtered, and enforced on the producer side rather than only
+after Quickshell's own buffering has already retained the data:
+`ptyrun.py`'s relay loop (`_bounded_relay_write`) tracks how many bytes
+it has forwarded since the last newline, for both the pty tabs and the
+one-shot weather fetch alike, and refuses to relay any further once that
+run exceeds 1MB (`_MAX_RELAY_RUN_BYTES`) — tearing the tab down (pty
+path) or exiting without forwarding more (weather path) instead. This
+matters because Quickshell's QML-side reader for each of those two paths
+buffers internally *before* ever handing control back to our own code:
+`SplitParser` (used for the pty tabs) holds an unterminated line
+undelivered until it sees a newline, so `BarWidget.qml`'s own
+`maxPendingBytes` check inside `onRead` never even runs on a stream that
+never terminates a line; `StdioCollector` (used for the one-shot weather
+fetch) retains the entire stream and only calls `onStreamFinished` once
+it closes, so `maxJsonBytes` there only ever discards a string that's
+already been fully retained. Enforcing the same 1MB ceiling one layer
+earlier, on the raw bytes before Quickshell's own reader gets them at
+all, means neither of those QML-side checks is actually the boundary —
+they're a second layer over a limit `ptyrun.py` already guarantees.
+`Ansi.parseAnsi` itself additionally caps a parsed frame to 2000 rows and
+4000 characters per row (`MAX_LINES`/`MAX_LINE_CHARS`) regardless of what
+the canvas grid ends up displaying.
 
 ### File boundary
 

@@ -197,7 +197,21 @@ unless something actively verifies them at run time. It does:
   import and call the manifest's pinned `module:attr` entry point, parsed
   and checked statement-by-statement — any additional import, call, or
   statement is a hard failure rather than something silently allowed
-  through; and (5) only then execs that resolved, verified path directly,
+  through. This extends to every argument slot on every call the checker
+  recognizes, not just which function is being called: the one optional
+  extra line installers commonly add (stripping a packaging suffix off
+  `sys.argv[0]`) is matched down to its exact literal arguments — a fixed
+  pattern string, an empty literal replacement, `sys.argv[0]` as the sole
+  subject, no keywords — rather than merely confirming the call target is
+  `re.sub`, since Python evaluates a call's arguments eagerly regardless
+  of what the call itself does with them; an earlier version of this check
+  verified only the call target and missed exactly that, letting a
+  tampered launcher smuggle a side-effecting expression in as one of
+  `re.sub`'s arguments (caught in marketplace review — see
+  [#3421](https://github.com/omacom/omarchy-plugin-marketplace/issues/3421)).
+  The same reasoning applies to `sys.exit(...)`'s own keyword arguments,
+  which are required empty for the same reason; and (5) only then execs
+  that resolved, verified path directly,
   never a bare `linecast` argv0. Any failure at any of those steps is a
   hard block — the popup shows why (see `linecastVersionWarning` in
   `BarWidget.qml`) and no `linecast` process is spawned at all until it's

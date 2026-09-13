@@ -143,15 +143,48 @@ def _verify_launcher_script(source_text, module, attr):
             and isinstance(node.slice, ast.Constant) and node.slice.value == 0
         )
 
+    # The one literal regex distlib/pip's console-script template actually
+    # uses for this line -- pinned exactly (not "any string constant")
+    # because a regex's *content* can't itself execute code, but pinning it
+    # anyway keeps this recognizing one known-benign template rather than
+    # silently accepting whatever pattern a tampered/unfamiliar template
+    # happens to use.
+    _ARGV0_STRIP_RESUB_PATTERN = r"(-script\.pyw|\.exe)?$"
+
     def is_argv0_strip_resub(node):
         # sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0])
-        return (
+        #
+        # Every one of re.sub's three arguments is checked below to be
+        # exactly this literal shape -- fixed pattern string, empty literal
+        # replacement, sys.argv[0] as the subject -- with no keywords and
+        # nothing else accepted positionally. An earlier version of this
+        # check only confirmed the *call target* was `re.sub` without ever
+        # looking at what was passed to it, so a tampered launcher could
+        # smuggle a side-effecting expression (e.g.
+        # `__import__("os").system(...)`) in as one of those arguments:
+        # Python evaluates call arguments eagerly, so that expression would
+        # run the moment the launcher executes regardless of what re.sub
+        # itself ends up doing with the result. (Reported directly against
+        # this exact function -- see
+        # omacom/omarchy-plugin-marketplace#3421.)
+        if not (
             isinstance(node, ast.Assign) and len(node.targets) == 1
             and is_sys_argv0(node.targets[0])
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Attribute)
             and isinstance(node.value.func.value, ast.Name)
             and node.value.func.value.id == "re" and node.value.func.attr == "sub"
+            and not node.value.keywords
+        ):
+            return False
+        args = node.value.args
+        if len(args) != 3:
+            return False
+        pattern, repl, subject = args
+        return (
+            isinstance(pattern, ast.Constant) and pattern.value == _ARGV0_STRIP_RESUB_PATTERN
+            and isinstance(repl, ast.Constant) and repl.value == ""
+            and is_sys_argv0(subject)
         )
 
     def is_argv0_strip_ifchain(node):
@@ -167,7 +200,7 @@ def _verify_launcher_script(source_text, module, attr):
         if not (isinstance(test, ast.Call) and isinstance(test.func, ast.Attribute)
                 and test.func.attr == "endswith" and is_sys_argv0(test.func.value)
                 and len(test.args) == 1 and isinstance(test.args[0], ast.Constant)
-                and isinstance(test.args[0].value, str)):
+                and isinstance(test.args[0].value, str) and not test.keywords):
             return False
         suffix_len = len(test.args[0].value)
         if len(node.body) != 1:
@@ -256,12 +289,20 @@ def _verify_launcher_script(source_text, module, attr):
     if len(stmts) != 1:
         return False, "launcher's if-guard has more than just sys.exit(...)"
     final = stmts[0]
+    # Every argument slot on both calls here is constrained -- sys.exit's
+    # own keywords included, not just its one positional argument -- for
+    # the same reason the re.sub fix above needed all three of its
+    # arguments checked: an unchecked keyword slot (e.g.
+    # `sys.exit(main(), x=__import__("os").system(...))`) is still a place
+    # for an arbitrary expression to get evaluated, whether or not sys.exit
+    # itself would ever do anything with it.
     ok = (
         isinstance(final, ast.Expr) and isinstance(final.value, ast.Call)
         and isinstance(final.value.func, ast.Attribute)
         and isinstance(final.value.func.value, ast.Name)
         and final.value.func.value.id == "sys" and final.value.func.attr == "exit"
-        and len(final.value.args) == 1 and isinstance(final.value.args[0], ast.Call)
+        and len(final.value.args) == 1 and not final.value.keywords
+        and isinstance(final.value.args[0], ast.Call)
         and isinstance(final.value.args[0].func, ast.Name)
         and final.value.args[0].func.id == attr
         and not final.value.args[0].args and not final.value.args[0].keywords

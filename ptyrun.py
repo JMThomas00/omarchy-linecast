@@ -54,22 +54,22 @@ import time
 # the package, at install time. An unpinned `uv tool install linecast` or
 # `pipx install linecast` (both of which this plugin's own README used to
 # document as equivalent alternatives) can write a self-consistent RECORD
-# for a *different* linecast 2.2.0 artifact than the one this plugin was
+# for a *different* linecast 2.3.1 artifact than the one this plugin was
 # actually reviewed against -- same declared version, same internally
 # consistent hashes, different bytes. Trusting RECORD as the hash source
 # verifies "this install is internally consistent," not "this install is
 # the reviewed one."
 #
 # EXPECTED_DIST is not from the installed environment. It's read from
-# linecast-2.2.0.manifest.json, generated once (see that file's header)
-# directly from the official linecast 2.2.0 wheel published to PyPI --
+# linecast-2.3.1.manifest.json, generated once (see that file's header)
+# directly from the official linecast 2.3.1 wheel published to PyPI --
 # the exact artifact whose sha256 is pinned in requirements-linecast.txt
 # and that `pip install --require-hashes` verifies at install time. Every
 # hash resolve_verified_linecast() compares against below comes from that
 # committed manifest, never from the installed distribution's own RECORD.
 EXPECTED_DIST = "linecast"
 _MANIFEST_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "linecast-2.2.0.manifest.json"
+    os.path.dirname(os.path.abspath(__file__)), "linecast-2.3.1.manifest.json"
 )
 
 # Individual installed file read during verification, capped so a planted
@@ -111,7 +111,7 @@ def _hash_matches(expected_b64, data):
     """Compare `data` against a manifest-recorded hash. The manifest
     stores sha256 as urlsafe-base64 (no padding), the same encoding
     PEP 376/427 RECORD files use, since it was generated directly from
-    the reviewed wheel's own RECORD (see linecast-2.2.0.manifest.json)."""
+    the reviewed wheel's own RECORD (see linecast-2.3.1.manifest.json)."""
     digest = hashlib.sha256(data).digest()
     computed = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     return computed == expected_b64
@@ -223,6 +223,31 @@ def _verify_launcher_script(source_text, module, attr):
             return is_argv0_strip_ifchain(node.orelse[0])
         return False
 
+    def is_argv0_strip_removesuffix(node):
+        # sys.argv[0] = sys.argv[0].removesuffix('.exe')
+        #
+        # pip's current launcher template (PipScriptMaker.script_template in
+        # pip/_internal/operations/install/wheel.py, as of pip 26) replaced
+        # distlib's re.sub form with this one specifically so generated
+        # scripts don't need to import `re` -- confirmed directly against a
+        # real pip-generated launcher (see
+        # github.com/JMThomas00/omarchy-linecast/issues/3). Pinned the same
+        # way as the other two recognized shapes: receiver, method name, and
+        # the single literal argument are all fixed, no keywords, nothing
+        # else accepted.
+        return (
+            isinstance(node, ast.Assign) and len(node.targets) == 1
+            and is_sys_argv0(node.targets[0])
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and is_sys_argv0(node.value.func.value)
+            and node.value.func.attr == "removesuffix"
+            and not node.value.keywords
+            and len(node.value.args) == 1
+            and isinstance(node.value.args[0], ast.Constant)
+            and node.value.args[0].value == ".exe"
+        )
+
     try:
         tree = ast.parse(source_text)
     except SyntaxError as e:
@@ -275,14 +300,18 @@ def _verify_launcher_script(source_text, module, attr):
         return False, "launcher's if-guard body is empty"
 
     # Optional, well-known argv0 suffix-stripping installers commonly add,
-    # in either of two forms actually observed from different installers'
-    # templates (pip/distlib's single re.sub call vs. uv's if/elif chain --
-    # confirmed directly against this machine's `uv tool install` output).
-    # Neither form does anything beyond trimming a known packaging-specific
-    # suffix off sys.argv[0]; nothing else is accepted here.
+    # in any of three forms actually observed from different installers'
+    # templates: distlib's single re.sub call, uv's if/elif chain (both
+    # confirmed directly against this machine's `uv tool install` output),
+    # and current pip's removesuffix call (confirmed against a real
+    # pip-generated launcher -- see
+    # github.com/JMThomas00/omarchy-linecast/issues/3). None of the three
+    # forms does anything beyond trimming a known packaging-specific suffix
+    # off sys.argv[0]; nothing else is accepted here.
     if len(stmts) > 1:
         head = stmts[0]
-        if not (is_argv0_strip_resub(head) or is_argv0_strip_ifchain(head)):
+        if not (is_argv0_strip_resub(head) or is_argv0_strip_ifchain(head)
+                or is_argv0_strip_removesuffix(head)):
             return False, "launcher has an unrecognized statement before sys.exit(...)"
         stmts = stmts[1:]
 
@@ -328,16 +357,26 @@ def _verify_launcher_shebang(candidate, venv_root):
     always place it "outside" the venv and reject every real install. The
     literal shebang path is what the installer actually wrote for this
     venv, which is what we want to confirm; existence/executability is
-    still checked against where that path actually leads."""
+    still checked against where that path actually leads.
+
+    The one optional trailing token accepted after the interpreter path is
+    an exact, bare `-E` -- pipx's own generated launchers carry it
+    (confirmed directly -- see
+    github.com/JMThomas00/omarchy-linecast/issues/1), and it's a
+    hardening flag, not a weakening one: CPython's `-E` tells the
+    interpreter to ignore PYTHON*-prefixed environment variables (so a
+    hostile PYTHONPATH/PYTHONSTARTUP etc. can't redirect what the launcher
+    imports), making this shebang strictly *more* trustworthy than one
+    without it. No other flag or argument is accepted."""
     try:
         with open(candidate, "rb") as fp:
             first_line = fp.readline(512)
     except OSError as e:
         return False, f"could not read launcher for shebang check: {e}"
 
-    m = re.match(rb"^#!\s*(\S+)\s*$", first_line.rstrip(b"\n"))
+    m = re.match(rb"^#!\s*(\S+)(?:\s+(-E))?\s*$", first_line.rstrip(b"\n"))
     if not m:
-        return False, "launcher has no plain `#!<interpreter>` shebang line"
+        return False, "launcher has no plain `#!<interpreter>` (optionally `-E`) shebang line"
     interp = m.group(1).decode("utf-8", errors="replace")
     if not os.path.isabs(interp):
         return False, f"launcher shebang interpreter is not an absolute path: {interp}"
@@ -382,9 +421,42 @@ def _venv_site_packages(venv_root):
     return candidate if os.path.isdir(candidate) else None
 
 
+def _scrub_pycache(path_str):
+    """Delete any cached bytecode for the source file at path_str, which
+    the caller has just hash-verified against the manifest. This matters
+    because PYTHONDONTWRITEBYTECODE (set in the exec'd environment in
+    main()) only stops *new* .pyc files from being written -- it does
+    nothing about one that already exists. A stale or planted
+    __pycache__ entry whose embedded invalidation header (mtime+size, or
+    a PEP 552 hash) still matches this exact file is exactly what
+    Python's import system loads and executes *instead of* re-reading the
+    .py bytes just hashed, so the hash check above would be proving
+    something about a file nothing will actually run. Deleting any
+    existing cache right after every verification pass -- every single
+    spawn, not just once at install time -- is what actually forces
+    Python to recompile from the verified source every time. Reported
+    directly (combined with the install-time case this doesn't cover --
+    see requirements-linecast.txt's --no-compile note) -- see
+    github.com/JMThomas00/omarchy-linecast/issues/1 and #3."""
+    if not path_str.endswith(".py"):
+        return
+    cache_dir = os.path.join(os.path.dirname(path_str), "__pycache__")
+    prefix = os.path.basename(path_str)[:-3] + "."
+    try:
+        entries = os.listdir(cache_dir)
+    except OSError:
+        return
+    for name in entries:
+        if name.startswith(prefix) and name.endswith(".pyc"):
+            try:
+                os.remove(os.path.join(cache_dir, name))
+            except OSError:
+                pass
+
+
 def resolve_verified_linecast():
     """Resolve the exact `linecast` executable to run and verify its
-    identity against the committed manifest (linecast-2.2.0.manifest.json),
+    identity against the committed manifest (linecast-2.3.1.manifest.json),
     never against anything the installed environment says about itself.
     PATH is used only to find a *candidate* file to inspect -- trust comes
     entirely from the checks below, all of which must pass before anything
@@ -501,6 +573,7 @@ def resolve_verified_linecast():
         if not _hash_matches(expected_hash, data):
             return False, f"installed file does not match its manifest-pinned hash: {path_str}", None
         seen_relpaths.add(relpath)
+        _scrub_pycache(path_str)
 
     missing = manifest_files.keys() - seen_relpaths
     if missing:
@@ -703,6 +776,51 @@ def _answer_osc_queries(data, master_fd):
     return _OSC_QUERY_RE.sub(reply, data)
 
 
+# Plain DSR cursor-position request (`ESC[6n`) and its DEC-private variant
+# (`ESC[?6n`) -- linecast (2.4.0+) sends one of these right after printing a
+# test string, to measure how many columns the terminal actually advanced
+# and so detect whether a multi-codepoint grapheme cluster (an emoji with a
+# variation selector, a Devanagari conjunct, ...) rendered as one cell or
+# more than one. Confirmed directly (see
+# github.com/JMThomas00/omarchy-linecast/issues/4): this plugin's pty has
+# nothing on the other end that answers either form, and linecast's own
+# documented timeout for the reply doesn't reliably fire, so every `--live`
+# tab stalls partway through its first frame waiting on an answer that
+# never comes.
+_DSR_QUERY_RE = re.compile(rb"\x1b\[(\??)6n")
+
+
+def _answer_dsr_queries(data, master_fd):
+    """Reply to a DSR cursor-position request the same way
+    _answer_osc_queries replies to a colour query: write the answer back
+    into master_fd so linecast reads it as if a real terminal answered, and
+    strip the query out of what gets forwarded to our own stdout.
+
+    The reply is always a fixed `row 1, column 1` (DECXCPR additionally
+    reports `page 1` for the `?` form) -- this relay has no real notion of
+    where the cursor actually is (TermCanvas repaints each full frame from
+    scratch rather than tracking cursor-addressed state; see Ansi.js's own
+    "known gap" note), so there's no better answer available. A fixed,
+    always-valid position can't be a *correct* grapheme-width measurement
+    for every probe, but unblocking every tab's first frame is a strict
+    improvement over the indefinite stall this plugin had without any
+    answer at all, and is self-consistent with the rest of this file's
+    approach: answer with the best fixed, deterministic value a dumb byte
+    relay can give, rather than attempt real terminal emulation."""
+    if b"\x1b[" not in data or b"6n" not in data:
+        return data
+
+    def reply(m):
+        response = "\x1b[?1;1;1R" if m.group(1) == b"?" else "\x1b[1;1R"
+        try:
+            os.write(master_fd, response.encode("ascii"))
+        except OSError:
+            pass
+        return b""
+
+    return _DSR_QUERY_RE.sub(reply, data)
+
+
 # ---- Process-group teardown ---------------------------------------------
 #
 # The child below calls os.setsid() right after fork(), which makes it both
@@ -828,6 +946,13 @@ def main():
             sys.stderr.write(f"ptyrun: refusing to run linecast: {resolved}\n")
             sys.exit(1)
         cmd = [resolved] + cmd[1:]
+        # _scrub_pycache() just deleted any cached bytecode that could have
+        # shadowed the source files resolve_verified_linecast() hashed --
+        # this is what stops this exec from immediately regenerating a
+        # fresh (untrusted-by-us, never re-verified) one the moment linecast
+        # actually imports its own modules. Set in the parent so both the
+        # no-pty and pty children below inherit it across fork().
+        os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
     if no_pty:
         # No pty needed for a plain one-shot command (e.g. the weather
@@ -958,6 +1083,7 @@ def main():
                 if not data:
                     break
                 data = _answer_osc_queries(data, master_fd)
+                data = _answer_dsr_queries(data, master_fd)
                 if not data:
                     continue
                 try:

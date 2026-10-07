@@ -54,22 +54,22 @@ import time
 # the package, at install time. An unpinned `uv tool install linecast` or
 # `pipx install linecast` (both of which this plugin's own README used to
 # document as equivalent alternatives) can write a self-consistent RECORD
-# for a *different* linecast 2.3.1 artifact than the one this plugin was
+# for a *different* linecast 2.10.0 artifact than the one this plugin was
 # actually reviewed against -- same declared version, same internally
 # consistent hashes, different bytes. Trusting RECORD as the hash source
 # verifies "this install is internally consistent," not "this install is
 # the reviewed one."
 #
 # EXPECTED_DIST is not from the installed environment. It's read from
-# linecast-2.3.1.manifest.json, generated once (see that file's header)
-# directly from the official linecast 2.3.1 wheel published to PyPI --
+# linecast-2.10.0.manifest.json, generated once (see that file's header)
+# directly from the official linecast 2.10.0 wheel published to PyPI --
 # the exact artifact whose sha256 is pinned in requirements-linecast.txt
 # and that `pip install --require-hashes` verifies at install time. Every
 # hash resolve_verified_linecast() compares against below comes from that
 # committed manifest, never from the installed distribution's own RECORD.
 EXPECTED_DIST = "linecast"
 _MANIFEST_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "linecast-2.3.1.manifest.json"
+    os.path.dirname(os.path.abspath(__file__)), "linecast-2.10.0.manifest.json"
 )
 
 # Individual installed file read during verification, capped so a planted
@@ -111,7 +111,7 @@ def _hash_matches(expected_b64, data):
     """Compare `data` against a manifest-recorded hash. The manifest
     stores sha256 as urlsafe-base64 (no padding), the same encoding
     PEP 376/427 RECORD files use, since it was generated directly from
-    the reviewed wheel's own RECORD (see linecast-2.3.1.manifest.json)."""
+    the reviewed wheel's own RECORD (see linecast-2.10.0.manifest.json)."""
     digest = hashlib.sha256(data).digest()
     computed = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     return computed == expected_b64
@@ -456,7 +456,7 @@ def _scrub_pycache(path_str):
 
 def resolve_verified_linecast():
     """Resolve the exact `linecast` executable to run and verify its
-    identity against the committed manifest (linecast-2.3.1.manifest.json),
+    identity against the committed manifest (linecast-2.10.0.manifest.json),
     never against anything the installed environment says about itself.
     PATH is used only to find a *candidate* file to inspect -- trust comes
     entirely from the checks below, all of which must pass before anything

@@ -8,11 +8,19 @@ import "Ansi.js" as Ansi
 // Companion to omarchy.weather, backed by the `linecast` CLI
 // (https://github.com/ashuttl/linecast). The bar pill shows the current
 // temperature; clicking it opens a popup with a weather hero card (mirroring
-// the native weather widget) plus six tabs — Weather, Radar, Sunshine, Moon,
-// Tides, Maps — each rendering that linecast subcommand's own `--live`
-// terminal output (captured with LINECAST_COLOR=truecolor over a real pty
-// and replayed frame-by-frame onto a small canvas terminal) rather than
-// reimplementing each view from scratch — radar's animation included.
+// the native weather widget) plus seven tabs — Weather, Radar, Sunshine,
+// Moon, Tides, Maps, Sky — each rendering that linecast subcommand's own
+// `--live` terminal output (captured with LINECAST_COLOR=truecolor over a
+// real pty and replayed frame-by-frame onto a small canvas terminal) rather
+// than reimplementing each view from scratch — radar's animation included.
+//
+// Sky (linecast 2.4.0+'s planetarium view) added 2026-10-07 once the pin
+// moved past 2.3.1 -- it needed nothing beyond this one tabs entry, since
+// every other piece (spawn, rendering, keyboard/mouse forwarding) is
+// already generic per tabId, not six special cases. Verified directly
+// first: captured sky --live's raw output and confirmed it follows the
+// same column-1/erase-line redraw pattern Ansi.js already handles for the
+// original six (see README -> Known limitations for that fix).
 BarWidget {
   id: root
   moduleName: "jmthomas00.linecast"
@@ -23,7 +31,8 @@ BarWidget {
     { id: "sunshine", label: "Sunshine" },
     { id: "moon", label: "Moon" },
     { id: "tides", label: "Tides" },
-    { id: "maps", label: "Maps" }
+    { id: "maps", label: "Maps" },
+    { id: "sky", label: "Sky" }
   ]
   // Higher than linecast's own terminal defaults on purpose: this grid is
   // rendered into a fixed-size box regardless of the host display, so more
@@ -480,7 +489,7 @@ BarWidget {
   function openPanel() {
     panel.open = true
     root.refreshWeather()
-    // Start every tab now, not just the active one -- all six are already
+    // Start every tab now, not just the active one -- all seven are already
     // warm by the time you click over to any of them, not just the ones
     // you happened to visit before. See the tabProcs comment above.
     for (var i = 0; i < root.tabs.length; i++) root.ensureTabLive(root.tabs[i].id)
@@ -492,7 +501,7 @@ BarWidget {
   // Routes through open/closePanel() rather than flipping panel.open
   // directly -- a plain click on the bar button is the normal way this
   // panel opens, so it has to run the same warm-up (weather refresh, all
-  // six tabs starting) as the IPC/hotkey open() path, not just show an
+  // seven tabs starting) as the IPC/hotkey open() path, not just show an
   // empty panel that only starts fetching once you click into a tab.
   function togglePanel() {
     if (panel.open) root.closePanel()

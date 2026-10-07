@@ -1,8 +1,8 @@
 # Linecast for Omarchy
 
 A companion to Omarchy's built-in weather widget: shows the current
-temperature in the bar, and opens all six of linecast's views — Weather,
-Radar, Sunshine, Moon, Tides, and Maps — live and interactive in one
+temperature in the bar, and opens all seven of linecast's views — Weather,
+Radar, Sunshine, Moon, Tides, Maps, and Sky — live and interactive in one
 popup, right from the menu bar.
 
 ![Demo](demo.gif)
@@ -11,7 +11,7 @@ popup, right from the menu bar.
 
 This plugin is a bar widget wrapper around **[linecast](https://github.com/ashuttl/linecast)**
 by [Andrew Shuttleworth](https://github.com/ashuttl) (MIT licensed). All the
-actual weather, radar, tide, sun, moon, and map data — and every bit of the
+actual weather, radar, tide, sun, moon, map, and night-sky data — and every bit of the
 terminal rendering you see in the dashboard — comes from linecast. This
 plugin doesn't reimplement any of that; it runs the real `linecast` CLI
 in the background and replays its live terminal output onto a canvas inside
@@ -25,8 +25,8 @@ If you find this useful, go star [linecast](https://github.com/ashuttl/linecast)
 ## Features
 
 - **Bar pill**: current temperature + condition icon, refreshed periodically.
-- **Click to open** one popup dashboard with all six of linecast's views —
-  Weather, Radar, Sunshine, Moon, Tides, Maps — as tabs, each embedded
+- **Click to open** one popup dashboard with all seven of linecast's views —
+  Weather, Radar, Sunshine, Moon, Tides, Maps, Sky — as tabs, each embedded
   and fully interactive right there; nothing opens in a separate window.
 - **Actually live**, not a static snapshot — radar animation, live sun/moon
   position, etc., exactly like running `linecast` in a terminal.
@@ -42,7 +42,7 @@ If you find this useful, go star [linecast](https://github.com/ashuttl/linecast)
 - [Omarchy](https://omarchy.org/) (Quickshell-based bar/shell)
 - Python 3 (used only for a small pty-forwarding helper; no extra pip
   packages needed)
-- **[linecast](https://github.com/ashuttl/linecast)** `2.3.1`, installed
+- **[linecast](https://github.com/ashuttl/linecast)** `2.10.0`, installed
   with the one command below — this is the exact release this plugin was
   last reviewed against (see [Security](#security) below). The plugin
   resolves and hash-verifies the installed package itself before every
@@ -66,12 +66,12 @@ If you find this useful, go star [linecast](https://github.com/ashuttl/linecast)
   install path. Verification itself isn't tied to that one install
   *method*, though: it resolves whatever `linecast` your shell's PATH
   actually finds, then hash-verifies that exact file against
-  `linecast-2.3.1.manifest.json` — a file *this repository ships and was
+  `linecast-2.10.0.manifest.json` — a file *this repository ships and was
   reviewed at*, generated once from the official PyPI release, not
   against anything the installed environment self-reports — which works
   the same way whether the installer was `pip`, `uv tool install`, or
   `pipx`. What actually matters is that the *installed version* is
-  exactly `2.3.1` with byte-identical files matching that committed
+  exactly `2.10.0` with byte-identical files matching that committed
   manifest; an unpinned `uv tool install linecast` or similar that lands
   on a different (even same-version) artifact will still show a hard
   "backend verification failed" banner and not run until it matches. See
@@ -144,40 +144,53 @@ the pty — so it behaves like an actual terminal, not a recording of one.
 
 ## Known limitations
 
-**The rendering gap that used to block newer releases is fixed; the pin
-is still `2.3.1` pending a separate decision to move it.** Starting with
+**History: this plugin used to be pinned below latest.** Starting with
 linecast `2.4.0`, every `--live` view's redraw strategy changed to
 absolute per-row cursor addressing (`ESC[row;colH` before every line),
-dropping plain newlines from the stream entirely. That broke this plugin
-outright on anything `2.4.0`+ (every tab showed "No data," indefinitely)
-until two things changed, credit to
+dropping plain newlines from the stream entirely — that broke this
+plugin outright on anything `2.4.0`+ (every tab showed "No data,"
+indefinitely), so it was pinned to `2.3.1` while a fix was built. Fixed
+2026-10-07 and the pin moved back to latest (`2.10.0`), credit to
 [@db48x](https://github.com/JMThomas00/omarchy-linecast/issues/5) for the
 core insight that made the fix far smaller than first expected:
 
-- `Ansi.js` now tracks which row index is being written to (set by the
+- `Ansi.js` tracks which row index is being written to (set by the
   cursor-position escape), rather than only ever appending to whatever
   row was last pushed — no column tracking needed, since every core view
-  (radar, weather, sunshine, moon, maps) always repositions to column 1
-  immediately followed by an erase-line, i.e. "clear and rewrite this
-  whole row." (Known, accepted gap: tides has two small sub-row overlays
-  — a live clock and the current tide height — that land at a nonzero
-  column with no erase-line; without column tracking these end up
-  appended to the row's existing content instead of precisely positioned.
-  Cosmetic only, same tier as the already-documented theme-picker gap.)
-- `SplitParser`'s `splitMarker` is now `""` instead of relying on the
-  default `"\n"` — with zero newlines anywhere in `2.4.0+`'s stream,
-  Quickshell would otherwise never find a delimiter to call `onRead` on
-  at all, independent of anything `Ansi.js` does with what it's given.
+  (radar, weather, sunshine, moon, maps, sky) always repositions to
+  column 1 immediately followed by an erase-line, i.e. "clear and
+  rewrite this whole row." (Known, accepted gap: tides has two small
+  sub-row overlays — a live clock and the current tide height — that
+  land at a nonzero column with no erase-line; without column tracking
+  these end up appended to the row's existing content instead of
+  precisely positioned. Cosmetic only, same tier as the
+  already-documented theme-picker gap.)
+- `SplitParser`'s `splitMarker` is `""` instead of relying on the default
+  `"\n"` — with zero newlines anywhere in `2.4.0+`'s stream, Quickshell
+  would otherwise never find a delimiter to call `onRead` on at all,
+  independent of anything `Ansi.js` does with what it's given.
 
-Verified directly against real output from all six views on `2.10.0`
-(screenshots, not just captured bytes), with no regression on the `2.3.1`
-backward-compatible path. Whether to actually move the pin off `2.3.1`
-now that the renderer supports newer releases is tracked separately in
-[#2](https://github.com/JMThomas00/omarchy-linecast/issues/2) and
-[#5](https://github.com/JMThomas00/omarchy-linecast/issues/5) — a version
-bump also needs a fresh manifest/`requirements-linecast.txt` and another
-marketplace revalidation round, so it's a deliberate follow-up, not a
-side effect of this fix.
+Verified directly against real output from all seven views on `2.10.0`
+(screenshots through the actual running widget, not just captured
+bytes), with no regression on the older newline-streamed shape older
+releases use. The Sky tab itself (added the same day) needed nothing
+beyond one entry in the `tabs` list — the renderer, spawn path, and
+keyboard/mouse forwarding are all already generic per view, not six (or
+seven) special cases.
+
+**Still true:** this plugin's `keyToBytes()` forwards printable
+characters and a fixed set of named keys (arrows, Enter, Backspace, Tab,
+Page Up/Down, Home, End) — covers every documented keybind across all
+seven views, including the newer `?` help panel and `w`/`a`/`s`/`d`
+panning, since those are ordinary printable characters, not a
+per-feature allowlist. Language selection (`linecast language <code>`,
+~28 languages as of `2.10.0`) is a setting linecast itself persists, so
+it works the same way through this plugin with no UI of its own; set it
+once outside the plugin and every spawn honors it. Whatever linecast adds
+next will need the same kind of direct verification this section already
+insists on, not an assumption that "it's probably fine" — see
+[#5](https://github.com/JMThomas00/omarchy-linecast/issues/5) for the
+reasoning trail if this breaks again on some future release.
 
 ## Security
 
@@ -195,22 +208,22 @@ repository controls none of the bytes that actually run as the backend
 unless something actively verifies them at run time. It does:
 
 - **Hash-verified install**: `requirements-linecast.txt` pins the exact
-  release this plugin was reviewed against (`2.3.1`) with the sha256
+  release this plugin was reviewed against (`2.10.0`) with the sha256
   hashes PyPI published for its sdist and wheel, installable with
   `pip install --require-hashes`. This is the one recommended, fully
   hash-bound install command.
 - **A committed trust root, not the installed environment's own word
-  about itself**: `linecast-2.3.1.manifest.json` in this repository — not
+  about itself**: `linecast-2.10.0.manifest.json` in this repository — not
   anything read from wherever `linecast` ends up installed — is what
   every hash comparison below is made against. It's generated once,
-  directly from the official `linecast-2.3.1` wheel published to PyPI
+  directly from the official `linecast-2.10.0` wheel published to PyPI
   (the same artifact `requirements-linecast.txt` pins by hash), and lists
   the sha256 of every file that wheel actually contains, plus its
   `console_scripts` entry point (`linecast.__main__:main`). An earlier
   version of this check instead re-hashed installed files against that
   same installation's own `RECORD` — which is written by whatever did the
   installing, so an unpinned `uv tool install`/`pipx install` of a
-  *different* `linecast` 2.3.1 artifact could self-report a consistent
+  *different* `linecast` 2.10.0 artifact could self-report a consistent
   but unreviewed `RECORD` and pass. Hashing against a manifest shipped and
   reviewed at this plugin's own commit closes that gap: the bytes have to
   match what was actually reviewed, not just be internally consistent
@@ -227,7 +240,7 @@ unless something actively verifies them at run time. It does:
   --user`) location and, if the resolved file lives inside a venv (as
   `uv tool install`/`pipx install` each create one per tool), that venv's
   own site-packages — refusing if no such distribution is found; (2)
-  requires its recorded version to match the manifest's (`2.3.1`); (3)
+  requires its recorded version to match the manifest's (`2.10.0`); (3)
   re-hashes every file the distribution claims to own against the sha256
   pinned for that exact relative path in the manifest, refusing on any
   mismatch, any file the manifest doesn't recognize, or any manifest file
@@ -292,8 +305,8 @@ Every `linecast <view> --live` process is spawned by `ptyrun.py` via
 `os.fork()` + `os.execv()` with a fixed argv — never a shell, never a
 concatenated command string — against the verified path from the backend
 binding check above. `tabId` (the only variable part of that argv) is
-validated by `isValidTab()` against this file's own hardcoded six-entry
-tab list (`weather`/`radar`/`sunshine`/`moon`/`tides`/`maps`) before it
+validated by `isValidTab()` against this file's own hardcoded seven-entry
+tab list (`weather`/`radar`/`sunshine`/`moon`/`tides`/`maps`/`sky`) before it
 ever reaches `showTab()`/`ensureTabLive()`, including values arriving
 through the `IpcHandler`'s `selectTab()` — an unrecognized or
 option-looking value is rejected outright rather than reaching argv.

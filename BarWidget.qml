@@ -590,9 +590,16 @@ BarWidget {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(16)
 
+            // This Text element and the unit-suffixed ones below all
+            // render fields from the weather JSON fetch (icon,
+            // temperature/wind/humidity units) -- same external-data
+            // reasoning as heroLocation's fix above, applied the same
+            // defensive way (and the same way Omarchy's own native weather
+            // panel sets this on every label, not just the riskiest one).
             Text {
               anchors.verticalCenter: parent.verticalCenter
               text: root.current ? (root.current.icon || "—") : "—"
+              textFormat: Text.PlainText
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: 64
@@ -605,6 +612,7 @@ BarWidget {
               Text {
                 id: tempBig
                 text: root.current ? String(Math.round(root.current.temperature)) : "—"
+                textFormat: Text.PlainText
                 color: root.bar.foreground
                 font.family: root.bar.fontFamily
                 font.pixelSize: 56
@@ -612,6 +620,7 @@ BarWidget {
               }
               Text {
                 text: root.current ? root.tempUnit : ""
+                textFormat: Text.PlainText
                 color: root.bar.foreground
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.display
@@ -642,6 +651,19 @@ BarWidget {
               }
               Text {
                 text: root.heroLocation.toUpperCase()
+                // heroLocation comes straight from the weather JSON fetch's
+                // `location` field -- a remote geocoder's text, not
+                // anything this plugin controls. Text's default textFormat
+                // (AutoText) auto-detects and renders HTML-like content, so
+                // a location name containing an <img> tag would trigger an
+                // automatic, silent outbound request for whatever URL it
+                // names. Forcing PlainText means this is always literal
+                // text, never interpreted as markup, regardless of
+                // content. (Reported directly -- see
+                // omacom/omarchy-plugin-marketplace#10308. Omarchy's own
+                // native weather panel sets this on every label for the
+                // same reason.)
+                textFormat: Text.PlainText
                 color: Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.body
@@ -666,6 +688,7 @@ BarWidget {
                 }
                 Text {
                   text: root.current ? (Math.round(root.current.feels_like) + root.tempUnit) : ""
+                  textFormat: Text.PlainText
                   color: root.bar.foreground
                   font.family: root.bar.fontFamily
                   font.pixelSize: Style.font.title
@@ -682,6 +705,7 @@ BarWidget {
                 }
                 Text {
                   text: root.current ? (Math.round(root.current.wind_speed) + " " + root.windUnit) : ""
+                  textFormat: Text.PlainText
                   color: root.bar.foreground
                   font.family: root.bar.fontFamily
                   font.pixelSize: Style.font.title
@@ -758,6 +782,7 @@ BarWidget {
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
                   text: modelData.icon || ""
+                  textFormat: Text.PlainText
                   color: root.bar.foreground
                   font.family: root.bar.fontFamily
                   font.pixelSize: Style.font.display

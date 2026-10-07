@@ -877,24 +877,45 @@ def _terminate_and_reap(pid):
 # (same 1MB), enforcing the identical ceiling here, on the raw bytes before
 # they ever reach Quickshell's stdin pipe, closes that gap regardless of
 # what either QML-side check does afterward.
+#
+# The reset boundary is a newline OR a frame-start marker (bare `ESC[H` or
+# the explicit `ESC[1;1H` 2.4.0+ always sends -- same two forms
+# BarWidget.qml's own _frameMarkerRe matches), not just a newline. A plain
+# newline-only reset was correct when this cap was written, but linecast
+# 2.4.0+'s --live streams carry zero newlines at all (see Ansi.js's header
+# comment), so a newline-only reset never fires for any of them: the run
+# counter just accumulates for the lifetime of the process until it trips
+# the ceiling and this tears the tab down -- confirmed directly, radar
+# (the densest/fastest-redrawing view) hit exactly this and died in 3.1s on
+# a clean standalone run, matching the "loads, then 'No data' after a few
+# seconds" report. A frame boundary is the real safe reset point for this
+# streaming shape (every real frame is tens of KB, nowhere near the cap --
+# same reasoning as BarWidget.qml's own per-frame maxPendingBytes reset),
+# and resetting on it as well as '\n' is a pure superset of the old
+# behavior: a stream with no frame markers at all (the pre-2.4.0 shape)
+# resets exactly the same way it always did.
 _MAX_RELAY_RUN_BYTES = 1 * 1024 * 1024
+_RELAY_RESET_RE = re.compile(rb"\n|\x1b\[(?:1;1)?H")
 
 
 class _RelayLimitExceeded(Exception):
     """Raised by _bounded_relay_write once a child's output has gone this
-    long without a line terminator -- see _MAX_RELAY_RUN_BYTES."""
+    long without hitting a reset boundary -- see _MAX_RELAY_RUN_BYTES."""
 
 
 def _bounded_relay_write(data, run_bytes):
     """Write `data` to our own stdout, tracking how many bytes have been
-    forwarded since the last newline. Returns the updated run length.
-    Raises _RelayLimitExceeded *without writing* once forwarding this
-    chunk would push that run past the ceiling, so a child that never
-    terminates a line (or, for the one-shot no-pty case, never stops
-    producing at all) can't make Quickshell's own reader retain more than
-    the cap before we've already refused to keep relaying."""
-    last_nl = data.rfind(b"\n")
-    new_run = (len(data) - last_nl - 1) if last_nl != -1 else (run_bytes + len(data))
+    forwarded since the last reset boundary (a newline or a frame-start
+    marker -- see _RELAY_RESET_RE). Returns the updated run length. Raises
+    _RelayLimitExceeded *without writing* once forwarding this chunk would
+    push that run past the ceiling, so a child that never hits a reset
+    boundary (or, for the one-shot no-pty case, never stops producing at
+    all) can't make Quickshell's own reader retain more than the cap
+    before we've already refused to keep relaying."""
+    last_end = -1
+    for m in _RELAY_RESET_RE.finditer(data):
+        last_end = m.end()
+    new_run = (len(data) - last_end) if last_end != -1 else (run_bytes + len(data))
     if new_run > _MAX_RELAY_RUN_BYTES:
         raise _RelayLimitExceeded()
     os.write(1, data)

@@ -154,15 +154,26 @@ BarWidget {
   // Quickshell does; it silently produced nothing).
   //
   // Every redraw is a full clear-and-repaint, marked by a cursor-home
-  // escape (frameMarker below) -- never an in-place partial update. That's
-  // what makes radar animate: swap in whatever's been drawn since the last
-  // one, same as swapping a static --print snapshot, just continuously
-  // instead of once. The exact boundary bytes around it vary between runs
-  // (cursor-home immediately followed by erase-screen in one capture,
-  // erase-screen/resets then cursor-home in another) but cursor-home alone
-  // reliably appears exactly once per frame in both, and any trailing
-  // erase/reset codes left dangling are harmless no-ops to Ansi.parseAnsi.
-  readonly property string frameMarker: root._esc + "[H"
+  // escape -- never an in-place partial update. That's what makes radar
+  // animate: swap in whatever's been drawn since the last one, same as
+  // swapping a static --print snapshot, just continuously instead of once.
+  // Cursor-home shows up in two forms depending on linecast's version: a
+  // bare `ESC[H` pre-2.4.0, or the explicit `ESC[1;1H` 2.4.0+ always sends
+  // (see Ansi.js's header comment for why 2.4.0 changed to absolute
+  // per-row cursor addressing) -- this regex matches either, and nothing
+  // else (a mid-frame jump to any other row, e.g. `ESC[5;1H`, has
+  // different digits and won't match). Either form reliably appears
+  // exactly once per frame, and any trailing erase/reset codes left
+  // dangling are harmless no-ops to Ansi.parseAnsi.
+  readonly property var _frameMarkerRe: /\x1b\[(?:1;1)?H/
+  // Finds the next frame-start marker at or after fromIndex, mirroring
+  // String.indexOf's contract (a plain substring search can't be reused
+  // here since the marker is one of two literal forms, not one fixed
+  // string) -- used in place of `pending.indexOf(frameMarker, fromIndex)`.
+  function findFrameMarker(str, fromIndex) {
+    var idx = str.slice(fromIndex).search(root._frameMarkerRe)
+    return idx === -1 ? -1 : idx + fromIndex
+  }
   property string activeTab: "radar"
 
   // A real frame at termCols x termRows with truecolor SGR runs before
@@ -288,32 +299,37 @@ BarWidget {
       property real lastByteMs: 0   // 0 means "nothing pending to settle"
       // Once a tab has cleanly cut a frame on a second marker, it's proven
       // it redraws often enough that a marker cut will always arrive -- the
-      // idle-settle fallback below must never fire for it again. Without
-      // this, radar/maps (redraw every ~150-200ms) hit a race: linecast's
-      // footer line carries no trailing newline, so SplitParser holds it
-      // internally, undelivered, until the *next* frame's bytes supply one.
-      // If the 40ms render timer's 50ms idle check lands in that ordinary
-      // gap -- which it does on a huge fraction of frames, since 50ms is
-      // well under radar's own redraw interval -- it promotes `pending`
-      // one line short (footer missing, still stuck inside SplitParser),
-      // and then the footer arrives moments later stapled onto the *next*
-      // frame's marker, where the `first > 0` trim discards it as
-      // stale-prefix garbage. That's what was making the footer/scrubber
-      // bar flicker in and out during zoom (confirmed directly: captured
-      // the exact promoted `buf` mid-bug, off by exactly one trailing line,
-      // every time). A view that only ever idle-settles (weather, moon,
-      // tides, sunshine, maps) never sets this, so their fallback is
-      // untouched.
+      // idle-settle fallback below must never fire for it again. A view
+      // that only ever idle-settles (weather, moon, tides, sunshine, maps)
+      // never sets this, so their fallback is untouched.
       property bool sawSecondMarker: false
 
       stdout: SplitParser {
+        // Empty splitMarker, not the "\n" default: 2.4.0+'s cursor-addressed
+        // redraws (see Ansi.js's header comment) carry zero newlines in the
+        // entire stream, and SplitParser only ever calls onRead once it
+        // finds its split marker in what it's buffered -- with none to
+        // find, onRead would simply never fire at all, no matter how long
+        // the process runs. An empty marker instead delivers whatever a
+        // single underlying read() returned, as soon as it's available, so
+        // `line` below is an arbitrary raw chunk (never a delimiter-stripped
+        // logical line, and never guaranteed to end on any particular
+        // boundary) rather than one real line -- which is also *why* no
+        // "+ \"\\n\"" gets appended when building `pending` from it below:
+        // with pre-2.4.0's newline-delimited output, the real newlines were
+        // never stripped in the first place (there's no delimiter being
+        // removed when the delimiter is empty), so they're still sitting in
+        // `line` wherever they really occurred, and gluing on a synthetic
+        // one after every arbitrary chunk boundary would inject a fake
+        // row-break into the 2.4.0+ case wherever a chunk happened to end.
+        //
         // Only the buffer is updated here — parsing + repainting happens on
-        // renderTimer's own schedule below, not once per line. During
-        // interaction (drag-panning maps, radar's fast animation) lines can
+        // renderTimer's own schedule below, not once per chunk. During
+        // interaction (drag-panning maps, radar's fast animation) chunks can
         // arrive dozens of times a second; reparsing the whole frame and
         // repainting the canvas that often was the actual source of the
         // reported lag, not the pty relay. Capping the render rate here
-        // decouples "how often lines arrive" from "how often we do the
+        // decouples "how often data arrives" from "how often we do the
         // expensive part."
         //
         // Two ways a frame gets promoted, not one: if a *second* marker
@@ -331,8 +347,9 @@ BarWidget {
         // reasonable time (weather, moon, tides, sunshine, maps all redraw
         // on the order of a minute or more) -- no marker cut is possible
         // there since there's nothing to cut against.
+        splitMarker: ""
         onRead: function(line) {
-          procInstance.pending += line + "\n"
+          procInstance.pending += line
           if (procInstance.pending.length > root.maxPendingBytes) {
             // No frame boundary has shown up across an unreasonable amount
             // of output -- stop trusting this stream rather than keep
@@ -342,10 +359,10 @@ BarWidget {
             root.stopTab(procInstance.tabId)
             return
           }
-          var first = procInstance.pending.indexOf(root.frameMarker)
+          var first = root.findFrameMarker(procInstance.pending, 0)
           if (first === -1) return
           if (first > 0) procInstance.pending = procInstance.pending.slice(first)
-          var second = procInstance.pending.indexOf(root.frameMarker, 1)
+          var second = root.findFrameMarker(procInstance.pending, 1)
           if (second !== -1) {
             procInstance.buf = procInstance.pending.slice(0, second)
             procInstance.pending = procInstance.pending.slice(second)

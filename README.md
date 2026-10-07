@@ -144,20 +144,40 @@ the pty — so it behaves like an actual terminal, not a recording of one.
 
 ## Known limitations
 
-**Pinned below the latest linecast release, on purpose.** This plugin is
-pinned to `2.3.1`, not whatever is newest on PyPI (see
-[#2](https://github.com/JMThomas00/omarchy-linecast/issues/2)). Starting
-with `2.4.0`, linecast changed every `--live` view's redraw strategy to
-absolute per-row cursor addressing (`ESC[row;colH` before every line) and
-dropped plain newlines from its live output entirely. `Ansi.js` is a
-simple "append text until a newline" parser with no real 2D grid model —
-confirmed directly: on `2.10.0`, every tab in the popup shows "No data,"
-indefinitely, because Quickshell's own `SplitParser` (keyed on newlines)
-never has a line boundary to deliver in the first place. `2.3.1` is the
-last release still using the older, newline-streamed rendering this
-parser actually understands. Properly supporting newer releases needs a
-real cursor-addressable grid renderer, not a small patch — tracked at
-[#5](https://github.com/JMThomas00/omarchy-linecast/issues/5).
+**The rendering gap that used to block newer releases is fixed; the pin
+is still `2.3.1` pending a separate decision to move it.** Starting with
+linecast `2.4.0`, every `--live` view's redraw strategy changed to
+absolute per-row cursor addressing (`ESC[row;colH` before every line),
+dropping plain newlines from the stream entirely. That broke this plugin
+outright on anything `2.4.0`+ (every tab showed "No data," indefinitely)
+until two things changed, credit to
+[@db48x](https://github.com/JMThomas00/omarchy-linecast/issues/5) for the
+core insight that made the fix far smaller than first expected:
+
+- `Ansi.js` now tracks which row index is being written to (set by the
+  cursor-position escape), rather than only ever appending to whatever
+  row was last pushed — no column tracking needed, since every core view
+  (radar, weather, sunshine, moon, maps) always repositions to column 1
+  immediately followed by an erase-line, i.e. "clear and rewrite this
+  whole row." (Known, accepted gap: tides has two small sub-row overlays
+  — a live clock and the current tide height — that land at a nonzero
+  column with no erase-line; without column tracking these end up
+  appended to the row's existing content instead of precisely positioned.
+  Cosmetic only, same tier as the already-documented theme-picker gap.)
+- `SplitParser`'s `splitMarker` is now `""` instead of relying on the
+  default `"\n"` — with zero newlines anywhere in `2.4.0+`'s stream,
+  Quickshell would otherwise never find a delimiter to call `onRead` on
+  at all, independent of anything `Ansi.js` does with what it's given.
+
+Verified directly against real output from all six views on `2.10.0`
+(screenshots, not just captured bytes), with no regression on the `2.3.1`
+backward-compatible path. Whether to actually move the pin off `2.3.1`
+now that the renderer supports newer releases is tracked separately in
+[#2](https://github.com/JMThomas00/omarchy-linecast/issues/2) and
+[#5](https://github.com/JMThomas00/omarchy-linecast/issues/5) — a version
+bump also needs a fresh manifest/`requirements-linecast.txt` and another
+marketplace revalidation round, so it's a deliberate follow-up, not a
+side effect of this fix.
 
 ## Security
 

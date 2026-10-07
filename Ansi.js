@@ -1,9 +1,5 @@
 // ANSI parser for linecast output captured with LINECAST_COLOR=truecolor.
-// Handles any CSI sequence (ESC [ ... <terminator>), not just SGR ('m'):
-// live-mode frames also carry erase-line ('K') and, at frame boundaries,
-// cursor-home/erase-screen ('H'/'J') — those are consumed silently since a
-// full-frame chunk (see BarWidget.qml's frame splitting) never needs to act
-// on them, only 'm' (color/bold) actually changes what gets drawn.
+// Handles any CSI sequence (ESC [ ... <terminator>), not just SGR ('m').
 //
 // fg/bg are kept as plain {r,g,b} objects rather than formatted "rgb(...)"
 // strings: TermCanvas's background pass writes straight into a pixel
@@ -15,27 +11,40 @@ function _colorEq(a, b) {
   return a.r === b.r && a.g === b.g && a.b === b.b
 }
 
-// Known gap: linecast's floating overlays (the theme picker opened with
-// 't', and likely others -- warning tooltips, maps' search/route panel)
-// position each of their rows with an absolute cursor jump (CSI row;colH),
-// not sequential text -- confirmed directly by capturing the raw bytes
-// with the picker open. This parser has no notion of a 2D addressable
-// grid (it only ever appends to whatever row is currently open, splitting
-// on literal '\n'), so a mid-frame row;col jump lands as more text tacked
-// onto whatever row is already open rather than at its real position --
-// the picker's box currently renders squashed onto the footer row instead
-// of as its own box. Properly fixing it means turning this into a real
-// cursor-addressable grid (plus handling reverse-video SGR, which the
-// picker's selected-row highlight also uses and this parser doesn't
-// support either) -- out of scope here since it only affects a secondary
-// interactive extra, not the core dashboard views, all of which render
-// correctly without ever needing mid-frame repositioning.
+// Row-addressed, not just sequential: linecast 2.4.0 switched every --live
+// view's redraw from streaming lines terminated by '\n' to absolute
+// per-row cursor positioning (CSI row;colH before each visible line,
+// almost always immediately followed by CSI K to erase it) -- confirmed
+// directly, 0 newlines in 6-8s of real --live output from 2.4.0 on. This
+// parser tracks which row index content is currently being written into
+// (set by H/f) rather than always appending to the last-pushed row, so it
+// handles both the old newline-streamed shape and the new cursor-addressed
+// one with the same code path. Credit to @db48x for the core insight
+// (github.com/JMThomas00/omarchy-linecast/issues/5) -- a row index is
+// genuinely enough; no column tracking needed, because every H observed
+// in radar/weather/sunshine/moon/maps targets column 1 and is immediately
+// followed by K, i.e. "erase from column 1 to end of line" == "clear the
+// whole row" -- confirmed by direct capture across all five.
+//
+// Known gap, same tier as the one this replaces: tides has two small
+// sub-row overlays (a live clock and the current tide height) that land
+// at a nonzero column with no erase-line, a genuine mid-row partial
+// update this parser has no column model for. Rather than a crash or a
+// wiped row, a revisited row with no erase in between keeps whatever was
+// already there and the new text is appended after it -- the overlay ends
+// up concatenated onto the row instead of precisely positioned, which is
+// a cosmetic miss on two small badges, not a layout break. Properly
+// covering it (and the already-accepted theme-picker-overlay gap this
+// comment used to describe alone) means real column tracking too; out of
+// scope here since every core dashboard row still renders correctly.
+//
 // Grid/cardinality caps applied while parsing, independent of whatever the
 // canvas actually goes on to draw (TermCanvas's own fixed gridCols/gridRows
 // only bound painting, not how much this function builds in memory first).
 // A real frame at BarWidget's 88x30 grid never comes close to either of
 // these -- they exist purely to bound a broken or adversarial stream, not
-// to constrain normal output.
+// to constrain normal output. A row index past MAX_LINES clamps to the
+// last row rather than growing the array further.
 var MAX_LINES = 2000
 var MAX_LINE_CHARS = 4000
 
@@ -44,9 +53,20 @@ function parseAnsi(raw) {
   var text = String(raw || "")
   var lines = []
   var curLine = []
+  var currentRow = 0
   var fg = null, bg = null, bold = false
   var buf = ""
   var lineChars = 0
+  // Whether any real content has been written to curLine since the last
+  // time we arrived at this row (gotoRow/newline). Distinguishes the two
+  // real shapes K (erase-line) shows up in: 2.4.0+ sends it immediately
+  // after a fresh CUP, before any content -- there, K means "about to
+  // receive this row's full content, discard whatever was carried over."
+  // Pre-2.4.0 streams send it *after* writing a row's real content, to
+  // erase trailing leftover characters from a previously wider frame at
+  // that same row -- there, clearing curLine would destroy the content
+  // that was just legitimately written. See the 'K' branch below.
+  var wroteThisVisit = false
 
   function flush() {
     if (buf.length > 0) {
@@ -55,11 +75,47 @@ function parseAnsi(raw) {
     }
   }
 
-  function newline() {
+  // Writes curLine back into the row it belongs to before moving away
+  // from it -- every row transition (CUP or a bare newline) goes through
+  // this, and the final row (wherever parsing ends) is committed once
+  // more after the main loop since nothing transitions away from it.
+  function commitCurrentRow() {
     flush()
-    lines.push(curLine)
+    lines[currentRow] = curLine
+  }
+
+  function ensureRow(row) {
+    if (row >= MAX_LINES) row = MAX_LINES - 1
+    while (lines.length <= row) lines.push([])
+    return row
+  }
+
+  // CSI row;colH (or the rarer ;f form) -- jump to a row directly. Column
+  // is intentionally never read: see the file-header comment for why a
+  // row index alone covers every core view. Carries over whatever was
+  // already at that row (rather than clearing it) so a revisit without an
+  // erase-line in between appends instead of destroying prior content --
+  // the graceful-degradation path for the tides overlay gap above. The
+  // overwhelmingly common case (a fresh CUP immediately followed by K)
+  // clears it anyway, via the 'K' branch below.
+  function gotoRow(row) {
+    commitCurrentRow()
+    currentRow = ensureRow(row)
+    curLine = lines[currentRow].slice()
+    lineChars = 0
+    for (var s = 0; s < curLine.length; s++) lineChars += curLine[s].text.length
+    wroteThisVisit = false
+  }
+
+  // A bare '\n' always means a genuinely fresh row (the pre-2.4.0
+  // newline-streamed shape this still supports) -- unlike gotoRow, it
+  // never carries over existing content at the target row.
+  function newline() {
+    commitCurrentRow()
+    currentRow = ensureRow(currentRow + 1)
     curLine = []
     lineChars = 0
+    wroteThisVisit = false
   }
 
   function isCsiTerminator(code) {
@@ -68,7 +124,6 @@ function parseAnsi(raw) {
 
   var i = 0
   while (i < text.length) {
-    if (lines.length >= MAX_LINES) break // frame too tall to be real -- stop building more rows
     var ch = text.charAt(i)
 
     if (ch === ESC && text.charAt(i + 1) === '[') {
@@ -111,8 +166,30 @@ function parseAnsi(raw) {
           flush()
           fg = newFg; bg = newBg; bold = newBold
         }
+      } else if (terminator === 'H' || terminator === 'f') {
+        var posParams = text.slice(i + 2, j).split(';')
+        var row = parseInt(posParams[0], 10) || 1
+        gotoRow(row - 1)
+      } else if (terminator === 'K') {
+        // Erase-line shows up in two real, opposite-feeling shapes, and
+        // wroteThisVisit is what tells them apart. 2.4.0+ sends it
+        // immediately after a fresh CUP, before any content -- nothing
+        // has been written to curLine yet this visit, so "erase from
+        // column 1 to end of line" means the whole row: discard whatever
+        // gotoRow carried over. Pre-2.4.0 streams instead send it *after*
+        // a row's real content, to erase trailing leftover characters
+        // from a previously wider frame at that row -- content has
+        // already been written this visit, so clearing curLine now would
+        // destroy what was just legitimately flushed into it; since we
+        // don't track a real column we can't know what (if anything) lies
+        // beyond that content to erase, so the correct move is nothing.
+        if (!wroteThisVisit) {
+          flush()
+          curLine = []
+          lineChars = 0
+        }
       }
-      // Any other terminator (K, H, J, private mode h/l, ...) — no visible
+      // Any other terminator (J, private mode h/l, ...) — no visible
       // effect on a single already-isolated frame; just consume it.
       i = j + 1
       continue
@@ -120,11 +197,11 @@ function parseAnsi(raw) {
 
     if (ch === '\n') { newline(); i++; continue }
     if (ch === '\r') { i++; continue }
-    if (lineChars < MAX_LINE_CHARS) { buf += ch; lineChars++ } // else: silently drop overflow for this row
+    if (lineChars < MAX_LINE_CHARS) { buf += ch; lineChars++; wroteThisVisit = true } // else: silently drop overflow for this row
     i++
   }
-  flush()
-  if (curLine.length > 0 || lines.length === 0) lines.push(curLine)
+  commitCurrentRow()
+  if (lines.length === 0) lines.push([])
 
   // Trailing blank lines are just print padding; trim them so the canvas
   // doesn't reserve height for empty rows.
